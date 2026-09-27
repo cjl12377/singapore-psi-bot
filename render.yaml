@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: singapore-psi-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false       # set manually in Render dashboard
+      - key: WEBHOOK_URL
+        sync: false       # set to your Render service URL, e.g. https://singapore-psi-bot.onrender.com
