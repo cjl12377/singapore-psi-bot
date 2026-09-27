@@ -6,6 +6,7 @@ import secrets
 import time
 
 from telegram import (
+    BotCommand,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
@@ -241,8 +242,19 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def _post_init(app: Application) -> None:
+    # /stats is deliberately absent so it never shows in Telegram's command menu.
+    await app.bot.set_my_commands([
+        BotCommand("psi", "Current PSI across Singapore"),
+        BotCommand("location", "PSI for where you are"),
+        BotCommand("alert", "Get notified when air quality changes"),
+        BotCommand("help", "Show available commands"),
+        BotCommand("start", "About this bot"),
+    ])
+
+
 def main() -> None:
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).post_init(_post_init).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("psi", cmd_psi))
