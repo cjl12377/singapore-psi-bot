@@ -65,7 +65,15 @@ async def get_psi_data() -> tuple[Optional[dict], Optional[str]]:
         return _cache["data"], reason if _cache["data"] else None
 
 
-REGIONS = ["north", "south", "east", "west", "central"]
+REGIONS = ["central", "north", "south", "east", "west"]
+
+LEGEND_ROWS = [
+    ("🟢", "Good", "0-50"),
+    ("🟡", "Moderate", "51-100"),
+    ("🟠", "Unhealthy", "101-200"),
+    ("🔴", "V. Unhealthy", "201-300"),
+    ("🟣", "Hazardous", ">300"),
+]
 
 
 def format_psi_message(data: dict, stale_reason: Optional[str] = None) -> str:
@@ -75,21 +83,24 @@ def format_psi_message(data: dict, stale_reason: Optional[str] = None) -> str:
             return "No PSI readings are currently available."
 
         latest = items[0]
-        timestamp = _fmt_timestamp(latest.get("timestamp", ""))
+        updated = _fmt_timestamp(latest.get("updatedTimestamp", ""))
         readings = latest["readings"]
 
         psi = readings.get("psi_twenty_four_hourly", {})
-        pm25 = readings.get("pm25_twenty_four_hourly", {})
 
         # v2 API reports only regional values, no national aggregate —
         # use the worst (highest) region as the headline figure.
         worst_region, worst_psi = max(psi.items(), key=lambda kv: kv[1])
         category, emoji = psi_category(worst_psi)
 
-        header = f"{'Region':<8}{'PSI':>4} {'PM2.5':>5}"
         region_lines = "\n".join(
-            f"{region.capitalize():<8}{psi.get(region, 0):>4} {pm25.get(region, 0):>5}"
+            f"{psi_category(psi[region])[1]} {region.capitalize()} — {psi[region]}"
             for region in REGIONS
+        )
+
+        legend_header = f"{'':<16}{'PSI Range':>9}"
+        legend_rows = "\n".join(
+            f"{e} {label:<13}{rng:>9}" for e, label, rng in LEGEND_ROWS
         )
 
         stale_banner = (
@@ -99,14 +110,15 @@ def format_psi_message(data: dict, stale_reason: Optional[str] = None) -> str:
 
         return (
             f"{stale_banner}"
+            f"🕐 <i>Last updated: {updated}</i>\n"
+            f"\n"
             f"{emoji} <b>PSI {worst_psi} — {category}</b>\n"
-            f"<i>{worst_region.capitalize()}, highest of 5 regions</i>\n"
+            f"<i>{worst_region.capitalize()} region, highest of 5</i>\n"
             f"\n"
-            f"<b>Singapore Air Quality</b> · {timestamp}\n"
+            f"<b>Regional Breakdown</b>\n"
+            f"{region_lines}\n"
             f"\n"
-            f"<pre>{header}\n{region_lines}</pre>\n"
-            f"🟢 0-50 Good | 🟡 51-100 Moderate | 🟠 101-200 Unhealthy\n"
-            f"🔴 201-300 Very Unhealthy | 🟣 301+ Hazardous"
+            f"<blockquote><pre>{legend_header}\n{legend_rows}</pre></blockquote>"
         )
     except (KeyError, IndexError, TypeError, ValueError):
         return "Error parsing PSI data. The API response format may have changed."
