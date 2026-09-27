@@ -1,5 +1,6 @@
 import logging
 import os
+import secrets
 import time
 
 from telegram import Update
@@ -11,14 +12,25 @@ logging.basicConfig(
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
     level=logging.INFO,
 )
+# httpx logs full request URLs at INFO, and Telegram embeds the bot token
+# in the URL path (https://api.telegram.org/bot<TOKEN>/...) — silence it
+# to keep the token out of application logs.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 WEBHOOK_URL = os.environ["WEBHOOK_URL"].rstrip("/")
 PORT = int(os.environ.get("PORT", 8443))
+WEBHOOK_SECRET = secrets.token_urlsafe(32)
 
 USER_COOLDOWN_SECS = 30
 _user_last_request: dict[str, float] = {}
+
+
+def _prune_stale_requests(now: float) -> None:
+    cutoff = now - USER_COOLDOWN_SECS
+    for uid in [u for u, ts in _user_last_request.items() if ts < cutoff]:
+        del _user_last_request[uid]
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -42,6 +54,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_psi(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = str(update.effective_user.id)
     now = time.monotonic()
+    _prune_stale_requests(now)
 
     wait = USER_COOLDOWN_SECS - (now - _user_last_request.get(user_id, 0))
     if wait > 0:
@@ -72,6 +85,7 @@ def main() -> None:
         port=PORT,
         url_path="webhook",
         webhook_url=f"{WEBHOOK_URL}/webhook",
+        secret_token=WEBHOOK_SECRET,
     )
 
 
