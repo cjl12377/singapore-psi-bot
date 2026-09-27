@@ -4,6 +4,7 @@ import secrets
 import time
 
 from telegram import Update
+from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 from psi import format_psi_message, get_psi_data
@@ -70,7 +71,9 @@ async def cmd_psi(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    await update.message.reply_text(format_psi_message(data, stale_reason))
+    await update.message.reply_text(
+        format_psi_message(data, stale_reason), parse_mode=ParseMode.HTML
+    )
 
 
 def main() -> None:
