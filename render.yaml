@@ -5,6 +5,8 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
     envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7     # python-telegram-bot 21.6 breaks on 3.14's stricter asyncio
       - key: BOT_TOKEN
         sync: false       # set manually in Render dashboard
       - key: WEBHOOK_URL
