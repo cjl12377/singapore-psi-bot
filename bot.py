@@ -9,6 +9,7 @@ from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes
 
+import analytics
 from psi import format_psi_message, get_psi_data
 
 logging.basicConfig(
@@ -25,6 +26,7 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 WEBHOOK_URL = os.environ["WEBHOOK_URL"].rstrip("/")
 PORT = int(os.environ.get("PORT", 8443))
 WEBHOOK_SECRET = secrets.token_urlsafe(32)
+ADMIN_USER_ID = int(os.environ["ADMIN_USER_ID"])
 
 USER_COOLDOWN_SECS = 30
 _user_last_request: dict[str, float] = {}
@@ -93,6 +95,7 @@ async def cmd_psi(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     _user_last_request[user_id] = now
+    await analytics.track_request(user_id)
 
     data, stale_reason = await get_psi_data()
     if data is None:
@@ -106,11 +109,36 @@ async def cmd_psi(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_user.id != ADMIN_USER_ID:
+        return  # silent — indistinguishable from an unrecognized command
+
+    active_24h = await analytics.active_users_24h()
+    total_users = await analytics.total_unique_users()
+    retained = await analytics.retained_users()
+    growth = await analytics.daily_growth(7)
+
+    growth_lines = "\n".join(f"{date[5:]}   +{count}" for date, count in growth)
+    week_total = sum(count for _, count in growth)
+
+    await update.message.reply_text(
+        f"<b>Bot Analytics</b>\n\n"
+        f"Active users (24h): <b>{active_24h}</b>\n"
+        f"All-time unique users: <b>{total_users}</b>\n"
+        f"Retained (4+ visits, >12h apart): <b>{retained}</b>\n\n"
+        f"<b>New users, last 7 days</b>\n"
+        f"<pre>{growth_lines}</pre>\n"
+        f"Total this week: +{week_total}",
+        parse_mode=ParseMode.HTML,
+    )
+
+
 def main() -> None:
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("psi", cmd_psi))
+    app.add_handler(CommandHandler("stats", cmd_stats))
 
     logger.info("Starting webhook on port %d → %s/webhook", PORT, WEBHOOK_URL)
     app.run_webhook(
