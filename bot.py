@@ -1,4 +1,6 @@
+import asyncio
 import logging
+import math
 import os
 import secrets
 import time
@@ -34,6 +36,30 @@ def _prune_stale_requests(now: float) -> None:
         del _user_last_request[uid]
 
 
+async def _countdown_and_delete(bot, chat_id: int, message_id: int, seconds: int) -> None:
+    """Ticks a cooldown message down to 0 once per second, then deletes it."""
+    remaining = seconds
+    while remaining > 0:
+        try:
+            await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            return
+        remaining -= 1
+        if remaining > 0:
+            try:
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=f"⏳ Please wait {remaining}s before requesting again.",
+                )
+            except Exception:
+                pass  # rate-limited or message already gone — skip this tick
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "Singapore PSI Bot\n\n"
@@ -59,7 +85,11 @@ async def cmd_psi(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     wait = USER_COOLDOWN_SECS - (now - _user_last_request.get(user_id, 0))
     if wait > 0:
-        await update.message.reply_text(f"Please wait {int(wait)}s before requesting again.")
+        wait_int = math.ceil(wait)
+        sent = await update.message.reply_text(f"⏳ Please wait {wait_int}s before requesting again.")
+        context.application.create_task(
+            _countdown_and_delete(context.bot, sent.chat_id, sent.message_id, wait_int)
+        )
         return
 
     _user_last_request[user_id] = now
