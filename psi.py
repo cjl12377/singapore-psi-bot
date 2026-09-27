@@ -76,7 +76,22 @@ LEGEND_ROWS = [
 ]
 
 
+def worst_region(data: dict) -> tuple[str, int]:
+    """v2 API reports only regional values, no national aggregate —
+    the worst (highest) region stands in as the headline figure."""
+    psi = data["data"]["items"][0]["readings"]["psi_twenty_four_hourly"]
+    return max(psi.items(), key=lambda kv: kv[1])
+
+
 def format_psi_message(data: dict, stale_reason: Optional[str] = None) -> str:
+    return _format(data, stale_reason, region=None)
+
+
+def format_region_psi_message(data: dict, region: str, stale_reason: Optional[str] = None) -> str:
+    return _format(data, stale_reason, region=region)
+
+
+def _format(data: dict, stale_reason: Optional[str], region: Optional[str]) -> str:
     try:
         items = data["data"]["items"]
         if not items:
@@ -84,14 +99,15 @@ def format_psi_message(data: dict, stale_reason: Optional[str] = None) -> str:
 
         latest = items[0]
         updated = _fmt_timestamp(latest.get("updatedTimestamp", ""))
-        readings = latest["readings"]
+        psi = latest["readings"]["psi_twenty_four_hourly"]
 
-        psi = readings.get("psi_twenty_four_hourly", {})
-
-        # v2 API reports only regional values, no national aggregate —
-        # use the worst (highest) region as the headline figure.
-        worst_region, worst_psi = max(psi.items(), key=lambda kv: kv[1])
-        category, emoji = psi_category(worst_psi)
+        if region is None:
+            headline_region, headline_psi = worst_region(data)
+            subtitle = f"{headline_region.capitalize()} region, highest of 5"
+        else:
+            headline_region, headline_psi = region, psi[region]
+            subtitle = f"📍 {region.capitalize()} — your nearest monitoring region"
+        category, emoji = psi_category(headline_psi)
 
         region_lines = "\n".join(
             f"{psi_category(psi[region])[1]} {region.capitalize()} — {psi[region]}"
@@ -112,8 +128,8 @@ def format_psi_message(data: dict, stale_reason: Optional[str] = None) -> str:
             f"{stale_banner}"
             f"🕐 <i>Last updated: {updated}</i>\n"
             f"\n"
-            f"{emoji} <b>PSI {worst_psi} — {category}</b>\n"
-            f"<i>{worst_region.capitalize()} region, highest of 5</i>\n"
+            f"{emoji} <b>PSI {headline_psi} — {category}</b>\n"
+            f"<i>{subtitle}</i>\n"
             f"\n"
             f"<b>Regional Breakdown</b>\n"
             f"{region_lines}\n"

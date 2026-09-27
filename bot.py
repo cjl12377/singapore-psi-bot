@@ -5,12 +5,28 @@ import os
 import secrets
 import time
 
-from telegram import Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+    Update,
+)
 from telegram.constants import ParseMode
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
+import alerts
 import analytics
-from psi import format_psi_message, get_psi_data
+from location import nearest_region
+from psi import format_psi_message, format_region_psi_message, get_psi_data
 
 logging.basicConfig(
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
@@ -62,25 +78,60 @@ async def _countdown_and_delete(bot, chat_id: int, message_id: int, seconds: int
         pass
 
 
+COMMANDS_TEXT = (
+    "/psi — current PSI across Singapore\n"
+    "/location — PSI for where you are (or just send a location)\n"
+    "/alert — get notified when air quality changes\n"
+    "/help — show this message"
+)
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "Singapore PSI Bot\n\n"
         "Get live air quality readings from the National Environment Agency.\n\n"
-        "/psi  — current PSI and PM2.5 readings\n"
-        "/help — show this message\n\n"
+        f"{COMMANDS_TEXT}\n\n"
         "Data from data.gov.sg, updated hourly."
     )
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "/psi  — current PSI and PM2.5 readings (national + regional)\n"
-        "/help — show this message\n\n"
+        f"{COMMANDS_TEXT}\n\n"
         "Readings are fetched from data.gov.sg and cached for 10 minutes."
     )
 
 
 async def cmd_psi(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _deliver_psi(update, context, region=None)
+
+
+async def cmd_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    keyboard = ReplyKeyboardMarkup(
+        [[KeyboardButton("📍 Share my location", request_location=True)]],
+        one_time_keyboard=True,
+        resize_keyboard=True,
+    )
+    await update.message.reply_text(
+        "Tap the button below to share your location — I'll use it once to find "
+        "your nearest PSI region and won't store it.",
+        reply_markup=keyboard,
+    )
+
+
+async def on_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    loc = update.message.location
+    region = nearest_region(loc.latitude, loc.longitude)
+    if region is None:
+        await update.message.reply_text(
+            "That doesn't look like it's in Singapore — PSI readings only cover Singapore.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return
+    await _deliver_psi(update, context, region=region)
+
+
+async def _deliver_psi(update: Update, context: ContextTypes.DEFAULT_TYPE, region: str | None) -> None:
     user_id = str(update.effective_user.id)
     now = time.monotonic()
     _prune_stale_requests(now)
@@ -88,7 +139,10 @@ async def cmd_psi(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     wait = USER_COOLDOWN_SECS - (now - _user_last_request.get(user_id, 0))
     if wait > 0:
         wait_int = math.ceil(wait)
-        sent = await update.message.reply_text(f"⏳ Please wait {wait_int}s before requesting again.")
+        sent = await update.message.reply_text(
+            f"⏳ Please wait {wait_int}s before requesting again.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
         context.application.create_task(
             _countdown_and_delete(context.bot, sent.chat_id, sent.message_id, wait_int)
         )
@@ -100,12 +154,80 @@ async def cmd_psi(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     data, stale_reason = await get_psi_data()
     if data is None:
         await update.message.reply_text(
-            f"Could not fetch PSI data: {stale_reason}. Please try again later."
+            f"Could not fetch PSI data: {stale_reason}. Please try again later.",
+            reply_markup=ReplyKeyboardRemove(),
         )
         return
 
+    text = (
+        format_psi_message(data, stale_reason)
+        if region is None
+        else format_region_psi_message(data, region, stale_reason)
+    )
     await update.message.reply_text(
-        format_psi_message(data, stale_reason), parse_mode=ParseMode.HTML
+        text, parse_mode=ParseMode.HTML, reply_markup=ReplyKeyboardRemove()
+    )
+
+
+def _alert_menu(subscribed: bool) -> InlineKeyboardMarkup:
+    buttons = [
+        InlineKeyboardButton(f"{d} day{'s' if d != 1 else ''}", callback_data=f"alt:du:{d}")
+        for d in alerts.ALERT_DURATIONS
+    ]
+    rows = [buttons[:3], buttons[3:]]
+    if subscribed:
+        rows.append([InlineKeyboardButton("🔕 Turn off alerts", callback_data="alt:off")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def cmd_alert(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    sub = await alerts.get_subscription(str(update.effective_user.id))
+    if sub:
+        left = alerts.days_left(float(sub["expires_at"]))
+        status = (
+            f"🔔 Alerts are <b>on</b> for {left} more day{'s' if left != 1 else ''}.\n\n"
+            "Pick a new duration to reset the timer, or turn them off:"
+        )
+    else:
+        status = (
+            "🔔 I'll message you whenever Singapore's PSI category changes "
+            "(e.g. Moderate → Unhealthy), with NEA's advice for that level.\n\n"
+            "How long should I watch for?"
+        )
+    await update.message.reply_text(
+        status, parse_mode=ParseMode.HTML, reply_markup=_alert_menu(bool(sub))
+    )
+
+
+async def on_alert_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    user_id = str(update.effective_user.id)
+    parts = query.data.split(":")
+
+    if parts == ["alt", "off"]:
+        await alerts.unsubscribe(user_id)
+        await query.edit_message_text("🔕 Alerts turned off. Send /alert anytime to turn them back on.")
+        return
+
+    if len(parts) != 3 or parts[1] != "du" or not parts[2].isdigit():
+        return
+    days = int(parts[2])
+    if days not in alerts.ALERT_DURATIONS:
+        return
+
+    reading = await alerts.current_reading()
+    if reading is None:
+        await query.edit_message_text("Couldn't reach data.gov.sg just now — please try /alert again in a bit.")
+        return
+    category, value, _ = reading
+
+    await alerts.subscribe(user_id, query.message.chat_id, days, category)
+    await query.edit_message_text(
+        f"✅ You're set — I'll ping you over the next {days} day{'s' if days != 1 else ''} "
+        f"if the air quality category changes.\n\n"
+        f"Right now: <b>{category}</b> (PSI {value}).",
+        parse_mode=ParseMode.HTML,
     )
 
 
@@ -139,6 +261,13 @@ def main() -> None:
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("psi", cmd_psi))
     app.add_handler(CommandHandler("stats", cmd_stats))
+    app.add_handler(CommandHandler("location", cmd_location))
+    # UpdateType.MESSAGE excludes live-location edits, which arrive as
+    # edited_message updates with update.message set to None.
+    app.add_handler(MessageHandler(filters.LOCATION & filters.UpdateType.MESSAGE, on_location))
+    app.add_handler(CommandHandler("alert", cmd_alert))
+    app.add_handler(CallbackQueryHandler(on_alert_button, pattern=r"^alt:"))
+    app.job_queue.run_repeating(alerts.run_alert_check, interval=1800, first=60)
 
     logger.info("Starting webhook on port %d → %s/webhook", PORT, WEBHOOK_URL)
     app.run_webhook(
