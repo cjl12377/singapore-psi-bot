@@ -1,5 +1,4 @@
 import logging
-import math
 import time
 from typing import Optional
 
@@ -12,8 +11,11 @@ from psi import PSI_BANDS, get_psi_data, psi_category, worst_region
 
 logger = logging.getLogger(__name__)
 
-ALERT_DURATIONS = (1, 3, 5, 7, 14)
 USERS_KEY = "psi:alert_users"
+# PSI hovering on a band edge (e.g. 100 <-> 101) would otherwise alert every
+# hour. Worsening always goes out; an improvement within this window of the
+# last alert is held back until the reading has settled.
+IMPROVEMENT_COOLDOWN_SECS = 3 * 3600
 
 CATEGORY_RANK = {label: i for i, (_, _, label, _) in enumerate(PSI_BANDS)}
 BAD_CATEGORIES = {"Unhealthy", "Very Unhealthy", "Hazardous"}
@@ -78,9 +80,8 @@ def advice_block(category: str) -> str:
     return "\n".join(f"• <b>{GROUP_LABELS[g]}:</b> {advice[g]}" for g in GROUP_LABELS)
 
 
-def format_alert(old: str, new: str, value: int, region: str, days_left: int) -> str:
+def format_alert(old: str, new: str, value: int, region: str) -> str:
     emoji = psi_category(value)[1]
-    remaining = f"{days_left} more day{'s' if days_left != 1 else ''}"
     return (
         f"{emoji} <b>Air quality is now {new}</b>\n"
         f"<i>PSI {value} ({region.capitalize()}, highest of 5) — was {old}</i>\n"
@@ -90,7 +91,7 @@ def format_alert(old: str, new: str, value: int, region: str, days_left: int) ->
         f"<b>NEA advisory</b>\n"
         f"{advice_block(new)}\n"
         f"\n"
-        f"<i>Alerts on for {remaining} · /alert to change</i>"
+        f"<i>/alert to turn these off</i>"
     )
 
 
@@ -106,20 +107,14 @@ async def current_reading() -> Optional[tuple[str, int, str]]:
     return psi_category(value)[0], value, region
 
 
-async def get_subscription(user_id: str) -> Optional[dict]:
-    sub = await redis_client.hgetall(_key(user_id))
-    if not sub or float(sub["expires_at"]) <= time.time():
-        return None
-    return sub
+async def is_subscribed(user_id: str) -> bool:
+    return bool(await redis_client.exists(_key(user_id)))
 
 
-async def subscribe(user_id: str, chat_id: int, days: int, category: str) -> None:
+async def subscribe(user_id: str, chat_id: int, category: str) -> None:
     pipe = redis_client.pipeline()
-    pipe.hset(_key(user_id), mapping={
-        "chat_id": chat_id,
-        "expires_at": time.time() + days * 86400,
-        "last_category": category,
-    })
+    pipe.delete(_key(user_id))
+    pipe.hset(_key(user_id), mapping={"chat_id": chat_id, "last_category": category})
     pipe.sadd(USERS_KEY, user_id)
     await pipe.execute()
 
@@ -131,8 +126,11 @@ async def unsubscribe(user_id: str) -> None:
     await pipe.execute()
 
 
-def days_left(expires_at: float) -> int:
-    return max(1, math.ceil((expires_at - time.time()) / 86400))
+def should_alert(old: str, new: str, last_alert_at: float, now: float) -> bool:
+    if old == new:
+        return False
+    worse = CATEGORY_RANK.get(new, 0) > CATEGORY_RANK.get(old, 0)
+    return worse or now - last_alert_at >= IMPROVEMENT_COOLDOWN_SECS
 
 
 async def run_alert_check(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -140,8 +138,10 @@ async def run_alert_check(context: ContextTypes.DEFAULT_TYPE) -> None:
     if not user_ids:
         return
 
-    reading = None
-    fetched = False
+    reading = await current_reading()
+    if reading is None:
+        return  # fetch failed or data stale — try again next tick
+    category, value, region = reading
     now = time.time()
 
     for uid in user_ids:
@@ -149,33 +149,16 @@ async def run_alert_check(context: ContextTypes.DEFAULT_TYPE) -> None:
         if not sub:
             await redis_client.srem(USERS_KEY, uid)
             continue
-        chat_id = int(sub["chat_id"])
-        expires_at = float(sub["expires_at"])
+        old = sub["last_category"]
+        if not should_alert(old, category, float(sub.get("last_alert_at", 0)), now):
+            continue
         try:
-            if expires_at <= now:
-                await unsubscribe(uid)
-                await context.bot.send_message(
-                    chat_id, "Your PSI alerts have ended. Send /alert to turn them back on."
-                )
-                continue
-
-            if not fetched:
-                reading = await current_reading()
-                fetched = True
-            if reading is None:
-                continue  # fetch failed — retry next tick, but keep processing expiries
-
-            category, value, region = reading
-            old = sub["last_category"]
-            if old == category:
-                continue
-
             await context.bot.send_message(
-                chat_id,
-                format_alert(old, category, value, region, days_left(expires_at)),
+                int(sub["chat_id"]),
+                format_alert(old, category, value, region),
                 parse_mode=ParseMode.HTML,
             )
-            await redis_client.hset(_key(uid), "last_category", category)
+            await redis_client.hset(_key(uid), mapping={"last_category": category, "last_alert_at": now})
         except Forbidden:
             await unsubscribe(uid)  # user blocked the bot
         except Exception:

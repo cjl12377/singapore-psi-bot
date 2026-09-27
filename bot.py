@@ -25,7 +25,7 @@ from telegram.ext import (
 
 import alerts
 import analytics
-from location import nearest_region
+from location import locate
 from psi import format_psi_message, format_region_psi_message, get_psi_data
 
 logging.basicConfig(
@@ -103,7 +103,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_psi(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await _deliver_psi(update, context, region=None)
+    await _deliver_psi(update, context, place=None)
 
 
 async def cmd_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -114,24 +114,28 @@ async def cmd_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
     await update.message.reply_text(
         "Tap the button below to share your location — I'll use it once to find "
-        "your nearest PSI region and won't store it.",
+        "your PSI region and won't store it.\n\n"
+        "On desktop? The button only works in the phone app — use 📎 → Location instead.",
         reply_markup=keyboard,
     )
 
 
 async def on_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.info("Location message received")  # never log the coordinates
     loc = update.message.location
-    region = nearest_region(loc.latitude, loc.longitude)
-    if region is None:
+    place = locate(loc.latitude, loc.longitude)
+    if place is None:
         await update.message.reply_text(
             "That doesn't look like it's in Singapore — PSI readings only cover Singapore.",
             reply_markup=ReplyKeyboardRemove(),
         )
         return
-    await _deliver_psi(update, context, region=region)
+    await _deliver_psi(update, context, place=place)
 
 
-async def _deliver_psi(update: Update, context: ContextTypes.DEFAULT_TYPE, region: str | None) -> None:
+async def _deliver_psi(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, place: tuple[str, str] | None
+) -> None:
     user_id = str(update.effective_user.id)
     now = time.monotonic()
     _prune_stale_requests(now)
@@ -161,74 +165,56 @@ async def _deliver_psi(update: Update, context: ContextTypes.DEFAULT_TYPE, regio
 
     text = (
         format_psi_message(data, stale_reason)
-        if region is None
-        else format_region_psi_message(data, region, stale_reason)
+        if place is None
+        else format_region_psi_message(data, *place, stale_reason)
     )
     await update.message.reply_text(
         text, parse_mode=ParseMode.HTML, reply_markup=ReplyKeyboardRemove()
     )
 
 
-def _alert_menu(subscribed: bool) -> InlineKeyboardMarkup:
-    buttons = [
-        InlineKeyboardButton(f"{d} day{'s' if d != 1 else ''}", callback_data=f"alt:du:{d}")
-        for d in alerts.ALERT_DURATIONS
-    ]
-    rows = [buttons[:3], buttons[3:]]
-    if subscribed:
-        rows.append([InlineKeyboardButton("🔕 Turn off alerts", callback_data="alt:off")])
-    return InlineKeyboardMarkup(rows)
+ALERT_EXPLAINER = (
+    "I'll message you whenever Singapore's PSI category changes "
+    "(e.g. Moderate → Unhealthy), with NEA's advice for that level."
+)
+
+
+def _alert_status(on: bool, extra: str = "") -> tuple[str, InlineKeyboardMarkup]:
+    if on:
+        text = f"🔔 Alerts are <b>on</b>.\n\n{ALERT_EXPLAINER}{extra}"
+        button = InlineKeyboardButton("🔕 Turn off alerts", callback_data="alt:off")
+    else:
+        text = f"🔕 Alerts are <b>off</b>.\n\n{ALERT_EXPLAINER}{extra}"
+        button = InlineKeyboardButton("🔔 Turn on alerts", callback_data="alt:on")
+    return text, InlineKeyboardMarkup([[button]])
 
 
 async def cmd_alert(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    sub = await alerts.get_subscription(str(update.effective_user.id))
-    if sub:
-        left = alerts.days_left(float(sub["expires_at"]))
-        status = (
-            f"🔔 Alerts are <b>on</b> for {left} more day{'s' if left != 1 else ''}.\n\n"
-            "Pick a new duration to reset the timer, or turn them off:"
-        )
-    else:
-        status = (
-            "🔔 I'll message you whenever Singapore's PSI category changes "
-            "(e.g. Moderate → Unhealthy), with NEA's advice for that level.\n\n"
-            "How long should I watch for?"
-        )
-    await update.message.reply_text(
-        status, parse_mode=ParseMode.HTML, reply_markup=_alert_menu(bool(sub))
-    )
+    on = await alerts.is_subscribed(str(update.effective_user.id))
+    text, markup = _alert_status(on)
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
 
 
 async def on_alert_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
     user_id = str(update.effective_user.id)
-    parts = query.data.split(":")
 
-    if parts == ["alt", "off"]:
+    if query.data == "alt:off":
         await alerts.unsubscribe(user_id)
-        await query.edit_message_text("🔕 Alerts turned off. Send /alert anytime to turn them back on.")
+        text, markup = _alert_status(False)
+    elif query.data == "alt:on":
+        reading = await alerts.current_reading()
+        if reading is None:
+            await query.edit_message_text("Couldn't reach data.gov.sg just now — please try /alert again in a bit.")
+            return
+        category, value, _ = reading
+        await alerts.subscribe(user_id, query.message.chat_id, category)
+        text, markup = _alert_status(True, f"\n\nRight now: <b>{category}</b> (PSI {value}).")
+    else:
         return
 
-    if len(parts) != 3 or parts[1] != "du" or not parts[2].isdigit():
-        return
-    days = int(parts[2])
-    if days not in alerts.ALERT_DURATIONS:
-        return
-
-    reading = await alerts.current_reading()
-    if reading is None:
-        await query.edit_message_text("Couldn't reach data.gov.sg just now — please try /alert again in a bit.")
-        return
-    category, value, _ = reading
-
-    await alerts.subscribe(user_id, query.message.chat_id, days, category)
-    await query.edit_message_text(
-        f"✅ You're set — I'll ping you over the next {days} day{'s' if days != 1 else ''} "
-        f"if the air quality category changes.\n\n"
-        f"Right now: <b>{category}</b> (PSI {value}).",
-        parse_mode=ParseMode.HTML,
-    )
+    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
 
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

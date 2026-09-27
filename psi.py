@@ -84,14 +84,16 @@ def worst_region(data: dict) -> tuple[str, int]:
 
 
 def format_psi_message(data: dict, stale_reason: Optional[str] = None) -> str:
-    return _format(data, stale_reason, region=None)
+    return _format(data, stale_reason, region=None, area=None)
 
 
-def format_region_psi_message(data: dict, region: str, stale_reason: Optional[str] = None) -> str:
-    return _format(data, stale_reason, region=region)
+def format_region_psi_message(
+    data: dict, area: str, region: str, stale_reason: Optional[str] = None
+) -> str:
+    return _format(data, stale_reason, region=region, area=area)
 
 
-def _format(data: dict, stale_reason: Optional[str], region: Optional[str]) -> str:
+def _format(data: dict, stale_reason: Optional[str], region: Optional[str], area: Optional[str]) -> str:
     try:
         items = data["data"]["items"]
         if not items:
@@ -106,7 +108,7 @@ def _format(data: dict, stale_reason: Optional[str], region: Optional[str]) -> s
             subtitle = f"{headline_region.capitalize()} region, highest of 5"
         else:
             headline_region, headline_psi = region, psi[region]
-            subtitle = f"📍 {region.capitalize()} — your nearest monitoring region"
+            subtitle = f"📍 {area} · {region.capitalize()} region"
         category, emoji = psi_category(headline_psi)
 
         region_lines = "\n".join(
