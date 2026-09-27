@@ -64,26 +64,30 @@ async def get_psi_data() -> tuple[Optional[dict], Optional[str]]:
         return _cache["data"], reason if _cache["data"] else None
 
 
+REGIONS = ["north", "south", "east", "west", "central"]
+
+
 def format_psi_message(data: dict, stale_reason: Optional[str] = None) -> str:
     try:
-        readings_list = data["data"]["readings"]
-        if not readings_list:
+        items = data["data"]["items"]
+        if not items:
             return "No PSI readings are currently available."
 
-        latest = readings_list[0]
+        latest = items[0]
         timestamp = _fmt_timestamp(latest.get("timestamp", ""))
-        r = latest["readings"]
+        readings = latest["readings"]
 
-        psi = r.get("psi_twenty_four_hourly", {})
-        pm25 = r.get("pm25_twenty_four_hourly", {})
+        psi = readings.get("psi_twenty_four_hourly", {})
+        pm25 = readings.get("pm25_twenty_four_hourly", {})
 
-        national_psi = psi.get("national", "N/A")
-        category = psi_category(national_psi) if isinstance(national_psi, (int, float)) else "Unknown"
+        # v2 API reports only regional values, no national aggregate —
+        # use the worst (highest) region as the headline figure.
+        worst_region, worst_psi = max(psi.items(), key=lambda kv: kv[1])
+        category = psi_category(worst_psi)
 
-        regions = ["north", "south", "east", "west", "central"]
         region_lines = "\n".join(
-            f"  {r.capitalize():<8} PSI {psi.get(r, 'N/A'):>3}   PM2.5 {pm25.get(r, 'N/A'):>3}"
-            for r in regions
+            f"  {region.capitalize():<8} PSI {psi.get(region, 'N/A'):>3}   PM2.5 {pm25.get(region, 'N/A'):>3}"
+            for region in REGIONS
         )
 
         stale_banner = (
@@ -96,8 +100,7 @@ def format_psi_message(data: dict, stale_reason: Optional[str] = None) -> str:
             f"Singapore Air Quality\n"
             f"As of {timestamp}\n"
             f"\n"
-            f"National PSI (24-hr): {national_psi} — {category}\n"
-            f"National PM2.5 (24-hr): {pm25.get('national', 'N/A')}\n"
+            f"Highest reading: {worst_psi} — {category} ({worst_region.capitalize()})\n"
             f"\n"
             f"Regional breakdown:\n"
             f"{region_lines}\n"
@@ -105,5 +108,5 @@ def format_psi_message(data: dict, stale_reason: Optional[str] = None) -> str:
             f"0-50 Good | 51-100 Moderate | 101-200 Unhealthy\n"
             f"201-300 Very Unhealthy | 301+ Hazardous"
         )
-    except (KeyError, IndexError, TypeError):
+    except (KeyError, IndexError, TypeError, ValueError):
         return "Error parsing PSI data. The API response format may have changed."
