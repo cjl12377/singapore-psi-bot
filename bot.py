@@ -14,7 +14,7 @@ from telegram import (
     ReplyKeyboardRemove,
     Update,
 )
-from telegram.constants import ParseMode
+from telegram.constants import ChatType, ParseMode
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -219,7 +219,7 @@ async def on_alert_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.effective_user.id != ADMIN_USER_ID:
+    if update.effective_user.id != ADMIN_USER_ID or update.effective_chat.type != ChatType.PRIVATE:
         return  # silent — indistinguishable from an unrecognized command
 
     active_24h = await analytics.active_users_24h()

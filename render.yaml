@@ -11,3 +11,7 @@ services:
         sync: false       # set manually in Render dashboard
       - key: WEBHOOK_URL
         sync: false       # set to your Render service URL, e.g. https://singapore-psi-bot.onrender.com
+      - key: REDIS_URL
+        sync: false       # redis:// connection string
+      - key: ADMIN_USER_ID
+        sync: false       # your numeric Telegram user ID, unlocks /stats
