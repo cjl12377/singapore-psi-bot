@@ -140,3 +140,59 @@ def _format(data: dict, stale_reason: Optional[str], region: Optional[str], area
         )
     except (KeyError, IndexError, TypeError, ValueError):
         return "Error parsing PSI data. The API response format may have changed."
+
+
+def _bar(value: int | float, cells: int = 10, scale: int = 100) -> str:
+    filled = max(1, min(cells, round(value / scale * cells))) if value > 0 else 0
+    return "█" * filled + "░" * (cells - filled)
+
+
+def format_psi_rich(
+    data: dict,
+    stale_reason: Optional[str] = None,
+    area: Optional[str] = None,
+    region: Optional[str] = None,
+) -> str:
+    """Rich-tier (sendRichMessage) Markdown. See .claude/skills/psi-rich-format."""
+    try:
+        latest = data["data"]["items"][0]
+        updated = _fmt_timestamp(latest.get("updatedTimestamp", ""))
+        psi = latest["readings"]["psi_twenty_four_hourly"]
+
+        if region is None:
+            headline_region, headline_psi = worst_region(data)
+            subtitle = f"{headline_region.capitalize()} region · highest of 5"
+        else:
+            headline_region, headline_psi = region, psi[region]
+            subtitle = f"📍 {area} · {region.capitalize()} region"
+        category, emoji = psi_category(headline_psi)
+
+        rows = "\n".join(
+            f"| {psi_category(psi[r])[1]} {r.capitalize()}"
+            f"{' ◀' if r == headline_region else ''} "
+            f"| **{psi[r]}** | {psi_category(psi[r])[0]} | `{_bar(psi[r])}` |"
+            for r in REGIONS
+        )
+        legend = "\n".join(f"| {e} {label} | {rng} |" for e, label, rng in LEGEND_ROWS)
+        banner = (
+            f"> ⚠️ **Stale data** — live fetch failed: {stale_reason}\n\n"
+            if stale_reason else ""
+        )
+
+        return (
+            f"{banner}"
+            f"# {emoji} PSI {headline_psi}\n"
+            f"**{category}** · {subtitle}\n"
+            f"*🕐 Updated {updated}*\n\n"
+            f"---\n\n"
+            f"### Regional breakdown\n\n"
+            f"| Region | PSI | Level | Scale |\n"
+            f"|:--|--:|:--|:--|\n"
+            f"{rows}\n\n"
+            f"### PSI guide\n\n"
+            f"| Level | PSI range |\n"
+            f"|:--|--:|\n"
+            f"{legend}"
+        )
+    except (KeyError, IndexError, TypeError, ValueError):
+        return "Error parsing PSI data. The API response format may have changed."

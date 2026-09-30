@@ -1,10 +1,12 @@
 import asyncio
+import json
 import logging
 import math
 import os
 import secrets
 import time
 
+import httpx
 from telegram import (
     BotCommand,
     InlineKeyboardButton,
@@ -27,7 +29,12 @@ from telegram.ext import (
 import alerts
 import analytics
 from location import locate
-from psi import format_psi_message, format_region_psi_message, get_psi_data
+from psi import (
+    format_psi_message,
+    format_psi_rich,
+    format_region_psi_message,
+    get_psi_data,
+)
 
 logging.basicConfig(
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
@@ -134,6 +141,25 @@ async def on_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await _deliver_psi(update, context, place=place)
 
 
+async def _send_rich(token: str, chat_id: int, markdown: str) -> bool:
+    """Send via Bot API sendRichMessage (PTB 21.6 has no wrapper). False -> caller falls back to HTML."""
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                f"https://api.telegram.org/bot{token}/sendRichMessage",
+                json={
+                    "chat_id": chat_id,
+                    "rich_message": json.dumps({"markdown": markdown}, ensure_ascii=False),
+                },
+            )
+        if resp.status_code == 200 and resp.json().get("ok"):
+            return True
+        logger.warning("sendRichMessage rejected: %s", resp.text[:200])
+    except Exception as exc:
+        logger.warning("sendRichMessage failed: %s", type(exc).__name__)
+    return False
+
+
 async def _deliver_psi(
     update: Update, context: ContextTypes.DEFAULT_TYPE, place: tuple[str, str] | None
 ) -> None:
@@ -162,6 +188,11 @@ async def _deliver_psi(
             f"Could not fetch PSI data: {stale_reason}. Please try again later.",
             reply_markup=ReplyKeyboardRemove(),
         )
+        return
+
+    area, region = place if place else (None, None)
+    if await _send_rich(context.bot.token, update.effective_chat.id,
+                        format_psi_rich(data, stale_reason, area, region)):
         return
 
     text = (
