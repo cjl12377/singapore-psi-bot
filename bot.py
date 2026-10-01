@@ -9,6 +9,9 @@ import time
 import httpx
 from telegram import (
     BotCommand,
+    BotCommandScopeAllChatAdministrators,
+    BotCommandScopeAllGroupChats,
+    BotCommandScopeAllPrivateChats,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
@@ -371,14 +374,20 @@ async def on_view_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def _post_init(app: Application) -> None:
     # /stats is deliberately absent so it never shows in Telegram's command menu.
-    await app.bot.set_my_commands([
+    commands = [
         BotCommand("psi", "Current PSI across Singapore"),
         BotCommand("location", "PSI for where you are"),
         BotCommand("alert", "Get notified when air quality changes"),
         BotCommand("view", "Choose map or text for /psi"),
         BotCommand("help", "Show available commands"),
         BotCommand("start", "About this bot"),
-    ])
+    ]
+    # Telegram shows the most specific scope that has commands, so stale lists in
+    # narrower scopes hide the default one. Clear them and set the ones users see.
+    for scope in (BotCommandScopeAllGroupChats(), BotCommandScopeAllChatAdministrators()):
+        await app.bot.delete_my_commands(scope=scope)
+    await app.bot.set_my_commands(commands)
+    await app.bot.set_my_commands(commands, scope=BotCommandScopeAllPrivateChats())
 
 
 def main() -> None:
