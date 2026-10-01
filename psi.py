@@ -221,11 +221,6 @@ def format_psi_caption(
         return "Error parsing PSI data. The API response format may have changed."
 
 
-def _bar(value: int | float, cells: int = 10, scale: int = 100) -> str:
-    filled = max(1, min(cells, round(value / scale * cells))) if value > 0 else 0
-    return "█" * filled + "░" * (cells - filled)
-
-
 def format_psi_rich(
     data: dict,
     stale_reason: Optional[str] = None,
@@ -253,7 +248,7 @@ def format_psi_rich(
         rows = "\n".join(
             f"| {psi_category(psi[r])[1]} {r.capitalize()}"
             f"{' ◀' if r == headline_region else ''} "
-            f"| **{psi[r]}** | {psi_category(psi[r])[0]} | `{_bar(psi[r])}` |"
+            f"| **{psi[r]}** | {psi_category(psi[r])[0]} |"
             for r in REGIONS
         )
         legend = "\n".join(f"| {e} {label} | {rng} |" for e, label, rng in LEGEND_ROWS)
@@ -276,8 +271,8 @@ def format_psi_rich(
             f"{head}"
             f"---\n\n"
             f"### Regional breakdown\n\n"
-            f"| Region | PSI | Level | Scale |\n"
-            f"|:--|--:|:--|:--|\n"
+            f"| Region | PSI | Level |\n"
+            f"|:--|--:|:--|\n"
             f"{rows}\n\n"
             f"{advisory}"
             f"### PSI guide\n\n"

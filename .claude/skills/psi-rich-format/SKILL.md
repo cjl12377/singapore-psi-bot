@@ -16,7 +16,7 @@ description: How the singapore-psi-bot formats /psi readings as Telegram rich me
 2. `# {band emoji} PSI {value}` — the headline number is the H1.
 3. `**{Band}** · {subtitle}` — worst region ("highest of 5") for `/psi`, or `📍 {area} · {Region} region` for a location lookup.
 4. `*🕐 Updated {timestamp}*`, then `---`.
-5. `### Regional breakdown` — table: Region | PSI | Level | Scale. Headline region marked `◀`. Scale is a 10-cell `█░` bar on a 0–100 scale (capped), in backticks so it stays monospace.
+5. `### Regional breakdown` — table: Region | PSI | Level. Headline region marked `◀`. (There used to be a 0–100 `█░` Scale bar; removed because it saturated at 100.)
 6. `### PSI guide` — band legend table (emoji + level, range right-aligned).
 
 ## Conventions
