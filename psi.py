@@ -183,8 +183,12 @@ def format_psi_rich(
     stale_reason: Optional[str] = None,
     area: Optional[str] = None,
     region: Optional[str] = None,
+    map_id: Optional[str] = None,
 ) -> str:
-    """Rich-tier (sendRichMessage) Markdown. See .claude/skills/psi-rich-format."""
+    """Rich-tier (sendRichMessage) Markdown. See .claude/skills/psi-rich-format.
+
+    With map_id, the regional table and guide are replaced by the uploaded map image
+    (referenced as tg://photo?id={map_id}; the caller supplies it in `media`)."""
     try:
         latest = data["data"]["items"][0]
         updated = _fmt_timestamp(latest.get("updatedTimestamp", ""))
@@ -210,11 +214,17 @@ def format_psi_rich(
             if stale_reason else ""
         )
 
-        return (
+        head = (
             f"{banner}"
             f"# {emoji} PSI {headline_psi}\n"
             f"**{category}** · {subtitle}\n"
             f"*🕐 Updated {updated}*\n\n"
+        )
+        if map_id:
+            return f"{head}![PSI by region](tg://photo?id={map_id})"
+
+        return (
+            f"{head}"
             f"---\n\n"
             f"### Regional breakdown\n\n"
             f"| Region | PSI | Level | Scale |\n"

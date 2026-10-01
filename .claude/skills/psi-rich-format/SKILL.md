@@ -35,4 +35,7 @@ description: How the singapore-psi-bot formats /psi readings as Telegram rich me
 Edit `format_psi_rich()`, then render locally with a sample payload (`{"data":{"items":[{"updatedTimestamp":"…","readings":{"psi_twenty_four_hourly":{"central":62,…}}}]}}`) and eyeball the Markdown; a real Telegram send is the only true render check.
 
 ## Map (primary /psi output)
-`/psi` now leads with a PNG map (`psi_map.render_psi_map`, Pillow) sent via `sendPhoto` with an HTML caption from `format_psi_caption()`. Regions are tinted pale by band with a solid band-coloured value badge; location lookups outline the user's planning area. The rich table above is the fallback if rendering or `sendPhoto` fails.
+`/psi` embeds a PNG map (`psi_map.render_psi_map`, Pillow) inside the rich message, replacing the regional table and guide (the legend is drawn on the image). The upload is multipart on `sendRichMessage`:
+- `rich_message` JSON: `{"markdown": "...![PSI by region](tg://photo?id=map)", "media": [{"id": "map", "media": {"type": "photo", "media": "attach://map.png"}}]}`, plus a `map.png` file part. Verified live; the `id` field and nested `media` object are required (error text: `Can't find field "id"`, `Field "media" must be of type Object`).
+- `attach://` directly in the markdown fails with `RICH_MESSAGE_PHOTO_URL_INVALID`; it must go through `tg://photo?id=`.
+- Fallback chain in `_deliver_psi`: rich + map -> `sendPhoto` + HTML caption (`format_psi_caption`) -> rich table -> HTML.

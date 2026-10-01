@@ -143,17 +143,30 @@ async def on_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await _deliver_psi(update, context, place=place)
 
 
-async def _send_rich(token: str, chat_id: int, markdown: str) -> bool:
-    """Send via Bot API sendRichMessage (PTB 21.6 has no wrapper). False -> caller falls back to HTML."""
+MAP_MEDIA_ID = "map"
+
+
+async def _send_rich(token: str, chat_id: int, markdown: str, png: bytes | None = None) -> bool:
+    """Send via Bot API sendRichMessage (PTB 21.6 has no wrapper). False -> caller falls back.
+
+    With png, the image is uploaded in the same request and the markdown must reference it
+    as tg://photo?id=MAP_MEDIA_ID."""
+    rich: dict = {"markdown": markdown}
+    if png:
+        rich["media"] = [{"id": MAP_MEDIA_ID,
+                          "media": {"type": "photo", "media": "attach://map.png"}}]
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.post(
-                f"https://api.telegram.org/bot{token}/sendRichMessage",
-                json={
-                    "chat_id": chat_id,
-                    "rich_message": json.dumps({"markdown": markdown}, ensure_ascii=False),
-                },
-            )
+        async with httpx.AsyncClient(timeout=20) as client:
+            payload = {"chat_id": chat_id,
+                       "rich_message": json.dumps(rich, ensure_ascii=False)}
+            if png:
+                resp = await client.post(
+                    f"https://api.telegram.org/bot{token}/sendRichMessage",
+                    data=payload, files={"map.png": ("map.png", png, "image/png")},
+                )
+            else:
+                resp = await client.post(
+                    f"https://api.telegram.org/bot{token}/sendRichMessage", json=payload)
         if resp.status_code == 200 and resp.json().get("ok"):
             return True
         logger.warning("sendRichMessage rejected: %s", resp.text[:200])
@@ -162,11 +175,18 @@ async def _send_rich(token: str, chat_id: int, markdown: str) -> bool:
     return False
 
 
-async def _send_map(token: str, chat_id: int, data: dict, caption: str, area: str | None) -> bool:
-    """Send the regional map as a photo (sendPhoto). False -> caller falls back to the rich table."""
+async def _render_map(data: dict, area: str | None) -> bytes | None:
     try:
         psi = data["data"]["items"][0]["readings"]["psi_twenty_four_hourly"]
-        png = await asyncio.to_thread(render_psi_map, psi, area)
+        return await asyncio.to_thread(render_psi_map, psi, area)
+    except Exception as exc:
+        logger.warning("PSI map render failed: %s", type(exc).__name__)
+        return None
+
+
+async def _send_map(token: str, chat_id: int, png: bytes, caption: str) -> bool:
+    """Send the regional map as a plain photo (sendPhoto). False -> caller falls back to the rich table."""
+    try:
         async with httpx.AsyncClient(timeout=20) as client:
             resp = await client.post(
                 f"https://api.telegram.org/bot{token}/sendPhoto",
@@ -212,12 +232,18 @@ async def _deliver_psi(
         return
 
     area, region = place if place else (None, None)
-    if await _send_map(context.bot.token, update.effective_chat.id, data,
-                       format_psi_caption(data, stale_reason, area, region), area):
-        if place:  # drop the "Share my location" keyboard; photos can't carry the removal
-            await update.message.reply_text("👆 Your area is outlined on the map.",
-                                            reply_markup=ReplyKeyboardRemove())
-        return
+    token, chat_id = context.bot.token, update.effective_chat.id
+    png = await _render_map(data, area)
+    if png:
+        # 1) map embedded in a rich message; 2) map as a plain photo + caption
+        if await _send_rich(token, chat_id,
+                            format_psi_rich(data, stale_reason, area, region, map_id=MAP_MEDIA_ID), png):
+            return
+        if await _send_map(token, chat_id, png, format_psi_caption(data, stale_reason, area, region)):
+            if place:  # photos can't carry the keyboard removal
+                await update.message.reply_text("👆 Your area is outlined on the map.",
+                                                reply_markup=ReplyKeyboardRemove())
+            return
     if await _send_rich(context.bot.token, update.effective_chat.id,
                         format_psi_rich(data, stale_reason, area, region)):
         return
