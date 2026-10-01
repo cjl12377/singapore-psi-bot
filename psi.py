@@ -142,6 +142,37 @@ def _format(data: dict, stale_reason: Optional[str], region: Optional[str], area
         return "Error parsing PSI data. The API response format may have changed."
 
 
+def format_psi_caption(
+    data: dict,
+    stale_reason: Optional[str] = None,
+    area: Optional[str] = None,
+    region: Optional[str] = None,
+) -> str:
+    """HTML caption for the PSI map photo (headline only; the map carries the breakdown)."""
+    try:
+        latest = data["data"]["items"][0]
+        updated = _fmt_timestamp(latest.get("updatedTimestamp", ""))
+        psi = latest["readings"]["psi_twenty_four_hourly"]
+        if region is None:
+            headline_region, headline_psi = worst_region(data)
+            subtitle = f"{headline_region.capitalize()} region · highest of 5"
+        else:
+            headline_psi = psi[region]
+            subtitle = f"📍 {area} · {region.capitalize()} region"
+        category, emoji = psi_category(headline_psi)
+        banner = (
+            f"⚠️ <b>Stale data</b> — live fetch failed: {stale_reason}\n\n"
+            if stale_reason else ""
+        )
+        return (
+            f"{banner}{emoji} <b>PSI {headline_psi} — {category}</b>\n"
+            f"{subtitle}\n"
+            f"<i>🕐 Updated {updated}</i>"
+        )
+    except (KeyError, IndexError, TypeError, ValueError):
+        return "Error parsing PSI data. The API response format may have changed."
+
+
 def _bar(value: int | float, cells: int = 10, scale: int = 100) -> str:
     filled = max(1, min(cells, round(value / scale * cells))) if value > 0 else 0
     return "█" * filled + "░" * (cells - filled)

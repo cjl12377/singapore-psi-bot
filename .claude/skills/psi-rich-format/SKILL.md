@@ -33,3 +33,6 @@ description: How the singapore-psi-bot formats /psi readings as Telegram rich me
 
 ## Changing the design
 Edit `format_psi_rich()`, then render locally with a sample payload (`{"data":{"items":[{"updatedTimestamp":"…","readings":{"psi_twenty_four_hourly":{"central":62,…}}}]}}`) and eyeball the Markdown; a real Telegram send is the only true render check.
+
+## Map (primary /psi output)
+`/psi` now leads with a PNG map (`psi_map.render_psi_map`, Pillow) sent via `sendPhoto` with an HTML caption from `format_psi_caption()`. Regions are tinted pale by band with a solid band-coloured value badge; location lookups outline the user's planning area. The rich table above is the fallback if rendering or `sendPhoto` fails.

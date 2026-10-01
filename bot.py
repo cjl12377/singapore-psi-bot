@@ -30,11 +30,13 @@ import alerts
 import analytics
 from location import locate
 from psi import (
+    format_psi_caption,
     format_psi_message,
     format_psi_rich,
     format_region_psi_message,
     get_psi_data,
 )
+from psi_map import render_psi_map
 
 logging.basicConfig(
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
@@ -160,6 +162,25 @@ async def _send_rich(token: str, chat_id: int, markdown: str) -> bool:
     return False
 
 
+async def _send_map(token: str, chat_id: int, data: dict, caption: str, area: str | None) -> bool:
+    """Send the regional map as a photo (sendPhoto). False -> caller falls back to the rich table."""
+    try:
+        psi = data["data"]["items"][0]["readings"]["psi_twenty_four_hourly"]
+        png = await asyncio.to_thread(render_psi_map, psi, area)
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.post(
+                f"https://api.telegram.org/bot{token}/sendPhoto",
+                data={"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"},
+                files={"photo": ("psi.png", png, "image/png")},
+            )
+        if resp.status_code == 200 and resp.json().get("ok"):
+            return True
+        logger.warning("sendPhoto rejected: %s", resp.text[:200])
+    except Exception as exc:
+        logger.warning("PSI map failed: %s", type(exc).__name__)
+    return False
+
+
 async def _deliver_psi(
     update: Update, context: ContextTypes.DEFAULT_TYPE, place: tuple[str, str] | None
 ) -> None:
@@ -191,6 +212,12 @@ async def _deliver_psi(
         return
 
     area, region = place if place else (None, None)
+    if await _send_map(context.bot.token, update.effective_chat.id, data,
+                       format_psi_caption(data, stale_reason, area, region), area):
+        if place:  # drop the "Share my location" keyboard; photos can't carry the removal
+            await update.message.reply_text("👆 Your area is outlined on the map.",
+                                            reply_markup=ReplyKeyboardRemove())
+        return
     if await _send_rich(context.bot.token, update.effective_chat.id,
                         format_psi_rich(data, stale_reason, area, region)):
         return
