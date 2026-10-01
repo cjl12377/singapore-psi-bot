@@ -1,3 +1,4 @@
+import html
 import time
 from datetime import datetime
 from typing import Optional
@@ -76,6 +77,50 @@ LEGEND_ROWS = [
 ]
 
 
+# Verbatim from NEA's 24-hour PSI health advisory — do not reword.
+ADVICE = {
+    "Good": {"all": "Normal activities for everyone."},
+    "Moderate": {"all": "Normal activities for everyone."},
+    "Unhealthy": {
+        "healthy": "Reduce prolonged or strenuous outdoor physical exertion.",
+        "vulnerable": "Minimise prolonged or strenuous outdoor physical exertion.",
+        "chronic": "Avoid prolonged or strenuous outdoor physical exertion.",
+    },
+    "Very Unhealthy": {
+        "healthy": "Avoid prolonged or strenuous outdoor physical exertion.",
+        "vulnerable": "Minimise outdoor activity.",
+        "chronic": "Avoid outdoor activity.",
+    },
+    "Hazardous": {
+        "healthy": "Minimise outdoor activity.",
+        "vulnerable": "Avoid outdoor activity.",
+        "chronic": "Avoid outdoor activity.",
+    },
+}
+
+GROUP_LABELS = {
+    "healthy": "Healthy persons",
+    "vulnerable": "Elderly, pregnant women & children",
+    "chronic": "Chronic lung or heart disease",
+}
+
+
+def advice_block(category: str) -> str:
+    """HTML (parse_mode=HTML) bullets."""
+    advice = ADVICE[category]
+    if "all" in advice:
+        return f"• {advice['all']}"
+    return "\n".join(f"• <b>{html.escape(GROUP_LABELS[g])}:</b> {advice[g]}" for g in GROUP_LABELS)
+
+
+def advice_markdown(category: str) -> str:
+    """Rich-message Markdown list."""
+    advice = ADVICE[category]
+    if "all" in advice:
+        return f"- {advice['all']}"
+    return "\n".join(f"- **{GROUP_LABELS[g]}:** {advice[g]}" for g in GROUP_LABELS)
+
+
 def worst_region(data: dict) -> tuple[str, int]:
     """v2 API reports only regional values, no national aggregate —
     the worst (highest) region stands in as the headline figure."""
@@ -136,6 +181,8 @@ def _format(data: dict, stale_reason: Optional[str], region: Optional[str], area
             f"<b>Regional Breakdown</b>\n"
             f"{region_lines}\n"
             f"\n"
+            f"<b>NEA advisory</b>\n{advice_block(category)}\n"
+            f"\n"
             f"<blockquote><pre>{legend_header}\n{legend_rows}</pre></blockquote>"
         )
     except (KeyError, IndexError, TypeError, ValueError):
@@ -167,7 +214,8 @@ def format_psi_caption(
         return (
             f"{banner}{emoji} <b>PSI {headline_psi} — {category}</b>\n"
             f"{subtitle}\n"
-            f"<i>🕐 Updated {updated}</i>"
+            f"<i>🕐 Updated {updated}</i>\n\n"
+            f"<b>NEA advisory</b>\n{advice_block(category)}"
         )
     except (KeyError, IndexError, TypeError, ValueError):
         return "Error parsing PSI data. The API response format may have changed."
@@ -220,8 +268,9 @@ def format_psi_rich(
             f"**{category}** · {subtitle}\n"
             f"*🕐 Updated {updated}*\n\n"
         )
+        advisory = f"### NEA advisory\n\n{advice_markdown(category)}\n\n"
         if map_id:
-            return f"{head}![PSI by region](tg://photo?id={map_id})"
+            return f"{head}![PSI by region](tg://photo?id={map_id})\n\n{advisory.rstrip()}"
 
         return (
             f"{head}"
@@ -230,6 +279,7 @@ def format_psi_rich(
             f"| Region | PSI | Level | Scale |\n"
             f"|:--|--:|:--|:--|\n"
             f"{rows}\n\n"
+            f"{advisory}"
             f"### PSI guide\n\n"
             f"| Level | PSI range |\n"
             f"|:--|--:|\n"

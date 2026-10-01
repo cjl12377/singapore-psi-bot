@@ -7,7 +7,7 @@ from telegram.error import Forbidden
 from telegram.ext import ContextTypes
 
 from analytics import redis_client
-from psi import PSI_BANDS, get_psi_data, psi_category, worst_region
+from psi import PSI_BANDS, advice_block, get_psi_data, psi_category, worst_region
 
 logger = logging.getLogger(__name__)
 
@@ -19,33 +19,6 @@ IMPROVEMENT_COOLDOWN_SECS = 3 * 3600
 
 CATEGORY_RANK = {label: i for i, (_, _, label, _) in enumerate(PSI_BANDS)}
 BAD_CATEGORIES = {"Unhealthy", "Very Unhealthy", "Hazardous"}
-
-# Verbatim from NEA's 24-hour PSI health advisory.
-ADVICE = {
-    "Good": {"all": "Normal activities for everyone."},
-    "Moderate": {"all": "Normal activities for everyone."},
-    "Unhealthy": {
-        "healthy": "Reduce prolonged or strenuous outdoor physical exertion.",
-        "vulnerable": "Minimise prolonged or strenuous outdoor physical exertion.",
-        "chronic": "Avoid prolonged or strenuous outdoor physical exertion.",
-    },
-    "Very Unhealthy": {
-        "healthy": "Avoid prolonged or strenuous outdoor physical exertion.",
-        "vulnerable": "Minimise outdoor activity.",
-        "chronic": "Avoid outdoor activity.",
-    },
-    "Hazardous": {
-        "healthy": "Minimise outdoor activity.",
-        "vulnerable": "Avoid outdoor activity.",
-        "chronic": "Avoid outdoor activity.",
-    },
-}
-
-GROUP_LABELS = {
-    "healthy": "Healthy persons",
-    "vulnerable": "Elderly, pregnant women &amp; children",
-    "chronic": "Chronic lung or heart disease",
-}
 
 ESCALATION_LINES = {
     "Unhealthy": "Uh oh, looks like it's not the best time to be outdoors.",
@@ -71,13 +44,6 @@ def opening_line(old: str, new: str) -> Optional[str]:
     if old in BAD_CATEGORIES:
         return ALL_CLEAR_LINE
     return MILD_CHANGE_LINE  # Good <-> Moderate
-
-
-def advice_block(category: str) -> str:
-    advice = ADVICE[category]
-    if "all" in advice:
-        return f"• {advice['all']}"
-    return "\n".join(f"• <b>{GROUP_LABELS[g]}:</b> {advice[g]}" for g in GROUP_LABELS)
 
 
 def format_alert(old: str, new: str, value: int, region: str) -> str:
