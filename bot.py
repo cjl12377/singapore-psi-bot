@@ -17,6 +17,7 @@ from telegram import (
     Update,
 )
 from telegram.constants import ChatType, ParseMode
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -28,13 +29,16 @@ from telegram.ext import (
 
 import alerts
 import analytics
+import prefs
 from location import locate
 from psi import (
+    format_psi_caption,
     format_psi_message,
     format_psi_rich,
     format_region_psi_message,
     get_psi_data,
 )
+from psi_map import render_psi_map
 
 logging.basicConfig(
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
@@ -90,6 +94,7 @@ COMMANDS_TEXT = (
     "/psi — current PSI across Singapore\n"
     "/location — PSI for where you are (or just send a location)\n"
     "/alert — get notified when air quality changes\n"
+    "/view — choose map or text for /psi\n"
     "/help — show this message"
 )
 
@@ -141,22 +146,61 @@ async def on_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await _deliver_psi(update, context, place=place)
 
 
-async def _send_rich(token: str, chat_id: int, markdown: str) -> bool:
-    """Send via Bot API sendRichMessage (PTB 21.6 has no wrapper). False -> caller falls back to HTML."""
+MAP_MEDIA_ID = "map"
+
+
+async def _send_rich(token: str, chat_id: int, markdown: str, png: bytes | None = None) -> bool:
+    """Send via Bot API sendRichMessage (PTB 21.6 has no wrapper). False -> caller falls back.
+
+    With png, the image is uploaded in the same request and the markdown must reference it
+    as tg://photo?id=MAP_MEDIA_ID."""
+    rich: dict = {"markdown": markdown}
+    if png:
+        rich["media"] = [{"id": MAP_MEDIA_ID,
+                          "media": {"type": "photo", "media": "attach://map.png"}}]
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.post(
-                f"https://api.telegram.org/bot{token}/sendRichMessage",
-                json={
-                    "chat_id": chat_id,
-                    "rich_message": json.dumps({"markdown": markdown}, ensure_ascii=False),
-                },
-            )
+        async with httpx.AsyncClient(timeout=20) as client:
+            payload = {"chat_id": chat_id,
+                       "rich_message": json.dumps(rich, ensure_ascii=False)}
+            if png:
+                resp = await client.post(
+                    f"https://api.telegram.org/bot{token}/sendRichMessage",
+                    data=payload, files={"map.png": ("map.png", png, "image/png")},
+                )
+            else:
+                resp = await client.post(
+                    f"https://api.telegram.org/bot{token}/sendRichMessage", json=payload)
         if resp.status_code == 200 and resp.json().get("ok"):
             return True
         logger.warning("sendRichMessage rejected: %s", resp.text[:200])
     except Exception as exc:
         logger.warning("sendRichMessage failed: %s", type(exc).__name__)
+    return False
+
+
+async def _render_map(data: dict, area: str | None) -> bytes | None:
+    try:
+        psi = data["data"]["items"][0]["readings"]["psi_twenty_four_hourly"]
+        return await asyncio.to_thread(render_psi_map, psi, area)
+    except Exception as exc:
+        logger.warning("PSI map render failed: %s", type(exc).__name__)
+        return None
+
+
+async def _send_map(token: str, chat_id: int, png: bytes, caption: str) -> bool:
+    """Send the regional map as a plain photo (sendPhoto). False -> caller falls back to the rich table."""
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.post(
+                f"https://api.telegram.org/bot{token}/sendPhoto",
+                data={"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"},
+                files={"photo": ("psi.png", png, "image/png")},
+            )
+        if resp.status_code == 200 and resp.json().get("ok"):
+            return True
+        logger.warning("sendPhoto rejected: %s", resp.text[:200])
+    except Exception as exc:
+        logger.warning("PSI map failed: %s", type(exc).__name__)
     return False
 
 
@@ -191,6 +235,19 @@ async def _deliver_psi(
         return
 
     area, region = place if place else (None, None)
+    token, chat_id = context.bot.token, update.effective_chat.id
+    wants_map = await prefs.get_view(user_id) == prefs.VIEW_MAP
+    png = await _render_map(data, area) if wants_map else None
+    if png:
+        # 1) map embedded in a rich message; 2) map as a plain photo + caption
+        if await _send_rich(token, chat_id,
+                            format_psi_rich(data, stale_reason, area, region, map_id=MAP_MEDIA_ID), png):
+            return
+        if await _send_map(token, chat_id, png, format_psi_caption(data, stale_reason, area, region)):
+            if place:  # photos can't carry the keyboard removal
+                await update.message.reply_text("👆 Your area is outlined on the map.",
+                                                reply_markup=ReplyKeyboardRemove())
+            return
     if await _send_rich(context.bot.token, update.effective_chat.id,
                         format_psi_rich(data, stale_reason, area, region)):
         return
@@ -273,12 +330,52 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+def _view_status(view: str) -> tuple[str, InlineKeyboardMarkup]:
+    mark = lambda v: "✅ " if view == v else ""
+    text = (
+        "How should /psi look?\n\n"
+        "🗺 <b>Map</b> — a map of Singapore with each region's PSI colour-coded.\n"
+        "📝 <b>Text</b> — a plain table, lighter on data.\n\n"
+        f"Currently: <b>{'Map' if view == prefs.VIEW_MAP else 'Text'}</b>"
+    )
+    return text, InlineKeyboardMarkup([[
+        InlineKeyboardButton(f"{mark(prefs.VIEW_MAP)}🗺 Map", callback_data="view:map"),
+        InlineKeyboardButton(f"{mark(prefs.VIEW_TEXT)}📝 Text", callback_data="view:text"),
+    ]])
+
+
+async def cmd_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text, markup = _view_status(await prefs.get_view(str(update.effective_user.id)))
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+
+
+async def on_view_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    view = query.data.removeprefix("view:")
+    if view not in (prefs.VIEW_MAP, prefs.VIEW_TEXT):
+        await query.answer()
+        return
+    try:
+        await prefs.set_view(str(update.effective_user.id), view)
+    except Exception as exc:
+        logger.warning("view preference write failed: %s", type(exc).__name__)
+        await query.answer("Couldn't save that — try again in a bit.", show_alert=True)
+        return
+    await query.answer("Saved")
+    text, markup = _view_status(view)
+    try:
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+    except BadRequest:  # tapping the already-selected button -> "message is not modified"
+        pass
+
+
 async def _post_init(app: Application) -> None:
     # /stats is deliberately absent so it never shows in Telegram's command menu.
     await app.bot.set_my_commands([
         BotCommand("psi", "Current PSI across Singapore"),
         BotCommand("location", "PSI for where you are"),
         BotCommand("alert", "Get notified when air quality changes"),
+        BotCommand("view", "Choose map or text for /psi"),
         BotCommand("help", "Show available commands"),
         BotCommand("start", "About this bot"),
     ])
@@ -296,6 +393,8 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.LOCATION & filters.UpdateType.MESSAGE, on_location))
     app.add_handler(CommandHandler("alert", cmd_alert))
     app.add_handler(CallbackQueryHandler(on_alert_button, pattern=r"^alt:"))
+    app.add_handler(CommandHandler("view", cmd_view))
+    app.add_handler(CallbackQueryHandler(on_view_button, pattern=r"^view:"))
     app.job_queue.run_repeating(alerts.run_alert_check, interval=1800, first=60)
 
     logger.info("Starting webhook on port %d → %s/webhook", PORT, WEBHOOK_URL)

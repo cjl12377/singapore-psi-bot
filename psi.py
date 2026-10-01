@@ -1,3 +1,4 @@
+import html
 import time
 from datetime import datetime
 from typing import Optional
@@ -76,6 +77,50 @@ LEGEND_ROWS = [
 ]
 
 
+# Verbatim from NEA's 24-hour PSI health advisory — do not reword.
+ADVICE = {
+    "Good": {"all": "Normal activities for everyone."},
+    "Moderate": {"all": "Normal activities for everyone."},
+    "Unhealthy": {
+        "healthy": "Reduce prolonged or strenuous outdoor physical exertion.",
+        "vulnerable": "Minimise prolonged or strenuous outdoor physical exertion.",
+        "chronic": "Avoid prolonged or strenuous outdoor physical exertion.",
+    },
+    "Very Unhealthy": {
+        "healthy": "Avoid prolonged or strenuous outdoor physical exertion.",
+        "vulnerable": "Minimise outdoor activity.",
+        "chronic": "Avoid outdoor activity.",
+    },
+    "Hazardous": {
+        "healthy": "Minimise outdoor activity.",
+        "vulnerable": "Avoid outdoor activity.",
+        "chronic": "Avoid outdoor activity.",
+    },
+}
+
+GROUP_LABELS = {
+    "healthy": "Healthy persons",
+    "vulnerable": "Elderly, pregnant women & children",
+    "chronic": "Chronic lung or heart disease",
+}
+
+
+def advice_block(category: str) -> str:
+    """HTML (parse_mode=HTML) bullets."""
+    advice = ADVICE[category]
+    if "all" in advice:
+        return f"• {advice['all']}"
+    return "\n".join(f"• <b>{html.escape(GROUP_LABELS[g])}:</b> {advice[g]}" for g in GROUP_LABELS)
+
+
+def advice_markdown(category: str) -> str:
+    """Rich-message Markdown list."""
+    advice = ADVICE[category]
+    if "all" in advice:
+        return f"- {advice['all']}"
+    return "\n".join(f"- **{GROUP_LABELS[g]}:** {advice[g]}" for g in GROUP_LABELS)
+
+
 def worst_region(data: dict) -> tuple[str, int]:
     """v2 API reports only regional values, no national aggregate —
     the worst (highest) region stands in as the headline figure."""
@@ -136,15 +181,44 @@ def _format(data: dict, stale_reason: Optional[str], region: Optional[str], area
             f"<b>Regional Breakdown</b>\n"
             f"{region_lines}\n"
             f"\n"
+            f"<b>PSI Health Warnings as per NEA</b>\n{advice_block(category)}\n"
+            f"\n"
             f"<blockquote><pre>{legend_header}\n{legend_rows}</pre></blockquote>"
         )
     except (KeyError, IndexError, TypeError, ValueError):
         return "Error parsing PSI data. The API response format may have changed."
 
 
-def _bar(value: int | float, cells: int = 10, scale: int = 100) -> str:
-    filled = max(1, min(cells, round(value / scale * cells))) if value > 0 else 0
-    return "█" * filled + "░" * (cells - filled)
+def format_psi_caption(
+    data: dict,
+    stale_reason: Optional[str] = None,
+    area: Optional[str] = None,
+    region: Optional[str] = None,
+) -> str:
+    """HTML caption for the PSI map photo (headline only; the map carries the breakdown)."""
+    try:
+        latest = data["data"]["items"][0]
+        updated = _fmt_timestamp(latest.get("updatedTimestamp", ""))
+        psi = latest["readings"]["psi_twenty_four_hourly"]
+        if region is None:
+            headline_region, headline_psi = worst_region(data)
+            subtitle = f"{headline_region.capitalize()} region · highest of 5"
+        else:
+            headline_psi = psi[region]
+            subtitle = f"📍 {area} · {region.capitalize()} region"
+        category, emoji = psi_category(headline_psi)
+        banner = (
+            f"⚠️ <b>Stale data</b> — live fetch failed: {stale_reason}\n\n"
+            if stale_reason else ""
+        )
+        return (
+            f"{banner}{emoji} <b>PSI {headline_psi} — {category}</b>\n"
+            f"{subtitle}\n"
+            f"<i>🕐 Updated {updated}</i>\n\n"
+            f"<b>PSI Health Warnings as per NEA</b>\n{advice_block(category)}"
+        )
+    except (KeyError, IndexError, TypeError, ValueError):
+        return "Error parsing PSI data. The API response format may have changed."
 
 
 def format_psi_rich(
@@ -152,8 +226,12 @@ def format_psi_rich(
     stale_reason: Optional[str] = None,
     area: Optional[str] = None,
     region: Optional[str] = None,
+    map_id: Optional[str] = None,
 ) -> str:
-    """Rich-tier (sendRichMessage) Markdown. See .claude/skills/psi-rich-format."""
+    """Rich-tier (sendRichMessage) Markdown. See .claude/skills/psi-rich-format.
+
+    With map_id, the regional table and guide are replaced by the uploaded map image
+    (referenced as tg://photo?id={map_id}; the caller supplies it in `media`)."""
     try:
         latest = data["data"]["items"][0]
         updated = _fmt_timestamp(latest.get("updatedTimestamp", ""))
@@ -170,7 +248,7 @@ def format_psi_rich(
         rows = "\n".join(
             f"| {psi_category(psi[r])[1]} {r.capitalize()}"
             f"{' ◀' if r == headline_region else ''} "
-            f"| **{psi[r]}** | {psi_category(psi[r])[0]} | `{_bar(psi[r])}` |"
+            f"| **{psi[r]}** | {psi_category(psi[r])[0]} |"
             for r in REGIONS
         )
         legend = "\n".join(f"| {e} {label} | {rng} |" for e, label, rng in LEGEND_ROWS)
@@ -179,17 +257,25 @@ def format_psi_rich(
             if stale_reason else ""
         )
 
-        return (
+        head = (
             f"{banner}"
             f"# {emoji} PSI {headline_psi}\n"
             f"**{category}** · {subtitle}\n"
             f"*🕐 Updated {updated}*\n\n"
+        )
+        advisory = f"### PSI Health Warnings as per NEA\n\n{advice_markdown(category)}\n\n"
+        if map_id:
+            return f"{head}![PSI by region](tg://photo?id={map_id})\n\n{advisory.rstrip()}"
+
+        return (
+            f"{head}"
             f"---\n\n"
             f"### Regional breakdown\n\n"
-            f"| Region | PSI | Level | Scale |\n"
-            f"|:--|--:|:--|:--|\n"
+            f"| Region | PSI | Level |\n"
+            f"|:--|--:|:--|\n"
             f"{rows}\n\n"
-            f"### PSI guide\n\n"
+            f"{advisory}"
+            f"### PSI Categories\n\n"
             f"| Level | PSI range |\n"
             f"|:--|--:|\n"
             f"{legend}"

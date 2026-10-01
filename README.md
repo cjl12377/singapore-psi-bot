@@ -6,7 +6,8 @@ Try it: [@Haze_SGbot](https://t.me/Haze_SGbot)
 
 ## Features
 
-- **`/psi`** — headline 24-hour PSI (the worst of Singapore's 5 regions), a regional breakdown, and a severity legend.
+- **`/psi`** — headline 24-hour PSI (the worst of Singapore's 5 regions) and a colour-coded map of Singapore with each region's value (or a text table; see `/view`).
+- **`/view`** — choose how `/psi` looks: the map (default, ~20 KB image) or a plain text table. Saved per user.
 - **`/location`**, or just send a location — finds your URA planning area and shows the PSI for its region.
 - **`/alert`** — an on/off toggle. While on, the bot messages you whenever the PSI category changes (e.g. Moderate → Unhealthy), with NEA's health advice for the new level.
 

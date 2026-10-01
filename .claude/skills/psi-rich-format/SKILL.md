@@ -16,8 +16,8 @@ description: How the singapore-psi-bot formats /psi readings as Telegram rich me
 2. `# {band emoji} PSI {value}` — the headline number is the H1.
 3. `**{Band}** · {subtitle}` — worst region ("highest of 5") for `/psi`, or `📍 {area} · {Region} region` for a location lookup.
 4. `*🕐 Updated {timestamp}*`, then `---`.
-5. `### Regional breakdown` — table: Region | PSI | Level | Scale. Headline region marked `◀`. Scale is a 10-cell `█░` bar on a 0–100 scale (capped), in backticks so it stays monospace.
-6. `### PSI guide` — band legend table (emoji + level, range right-aligned).
+5. `### Regional breakdown` — table: Region | PSI | Level. Headline region marked `◀`. (There used to be a 0–100 `█░` Scale bar; removed because it saturated at 100.)
+6. `### PSI Categories` — band legend table (emoji + level, range right-aligned).
 
 ## Conventions
 - Band emoji come from `PSI_BANDS`: 🟢 Good, 🟡 Moderate, 🟠 Unhealthy, 🔴 Very Unhealthy, 🟣 Hazardous. Use `psi_category()`; never hardcode thresholds elsewhere.
@@ -33,3 +33,12 @@ description: How the singapore-psi-bot formats /psi readings as Telegram rich me
 
 ## Changing the design
 Edit `format_psi_rich()`, then render locally with a sample payload (`{"data":{"items":[{"updatedTimestamp":"…","readings":{"psi_twenty_four_hourly":{"central":62,…}}}]}}`) and eyeball the Markdown; a real Telegram send is the only true render check.
+
+## Map (primary /psi output)
+`/psi` embeds a PNG map (`psi_map.render_psi_map`, Pillow) inside the rich message, replacing the regional table and guide (the legend is drawn on the image). The upload is multipart on `sendRichMessage`:
+- `rich_message` JSON: `{"markdown": "...![PSI by region](tg://photo?id=map)", "media": [{"id": "map", "media": {"type": "photo", "media": "attach://map.png"}}]}`, plus a `map.png` file part. Verified live; the `id` field and nested `media` object are required (error text: `Can't find field "id"`, `Field "media" must be of type Object`).
+- `attach://` directly in the markdown fails with `RICH_MESSAGE_PHOTO_URL_INVALID`; it must go through `tg://photo?id=`.
+- Fallback chain in `_deliver_psi`: rich + map -> `sendPhoto` + HTML caption (`format_psi_caption`) -> rich table -> HTML.
+- Size: the PNG is delivered at 720 px wide as an 8-bit palette image (~21 KB; `_to_palette` keeps every flat colour exact, because plain median-cut merges the severity badge colours).
+- Users choose map vs text via `/view` (`prefs.py`, Redis hash `psi:pref:{user_id}`, default map). Text view skips rendering and sends the rich table.
+- Health warnings: `### PSI Health Warnings as per NEA` section (map view: below the map; text view: between the table and the guide) for the headline category, from `psi.ADVICE` — verbatim NEA wording, shared with the alerts (`alerts.format_alert`). Also in the photo caption and HTML fallback. Never reword it.
