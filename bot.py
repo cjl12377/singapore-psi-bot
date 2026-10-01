@@ -208,30 +208,32 @@ async def _send_map(token: str, chat_id: int, png: bytes, caption: str) -> bool:
 
 
 async def _deliver_psi(
-    update: Update, context: ContextTypes.DEFAULT_TYPE, place: tuple[str, str] | None
+    update: Update, context: ContextTypes.DEFAULT_TYPE, place: tuple[str, str] | None,
+    preview: bool = False,
 ) -> None:
     user_id = str(update.effective_user.id)
     now = time.monotonic()
-    _prune_stale_requests(now)
+    if not preview:  # a /view preview isn't a fresh request: no cooldown or analytics
+        _prune_stale_requests(now)
 
-    wait = USER_COOLDOWN_SECS - (now - _user_last_request.get(user_id, 0))
-    if wait > 0:
-        wait_int = math.ceil(wait)
-        sent = await update.message.reply_text(
-            f"⏳ Please wait {wait_int}s before requesting again.",
-            reply_markup=ReplyKeyboardRemove(),
-        )
-        context.application.create_task(
-            _countdown_and_delete(context.bot, sent.chat_id, sent.message_id, wait_int)
-        )
-        return
+        wait = USER_COOLDOWN_SECS - (now - _user_last_request.get(user_id, 0))
+        if wait > 0:
+            wait_int = math.ceil(wait)
+            sent = await update.effective_chat.send_message(
+                f"⏳ Please wait {wait_int}s before requesting again.",
+                reply_markup=ReplyKeyboardRemove(),
+            )
+            context.application.create_task(
+                _countdown_and_delete(context.bot, sent.chat_id, sent.message_id, wait_int)
+            )
+            return
 
-    _user_last_request[user_id] = now
-    await analytics.track_request(user_id)
+        _user_last_request[user_id] = now
+        await analytics.track_request(user_id)
 
     data, stale_reason = await get_psi_data()
     if data is None:
-        await update.message.reply_text(
+        await update.effective_chat.send_message(
             f"Could not fetch PSI data: {stale_reason}. Please try again later.",
             reply_markup=ReplyKeyboardRemove(),
         )
@@ -248,7 +250,7 @@ async def _deliver_psi(
             return
         if await _send_map(token, chat_id, png, format_psi_caption(data, stale_reason, area, region)):
             if place:  # photos can't carry the keyboard removal
-                await update.message.reply_text("👆 Your area is outlined on the map.",
+                await update.effective_chat.send_message("👆 Your area is outlined on the map.",
                                                 reply_markup=ReplyKeyboardRemove())
             return
     if await _send_rich(context.bot.token, update.effective_chat.id,
@@ -260,7 +262,7 @@ async def _deliver_psi(
         if place is None
         else format_region_psi_message(data, *place, stale_reason)
     )
-    await update.message.reply_text(
+    await update.effective_chat.send_message(
         text, parse_mode=ParseMode.HTML, reply_markup=ReplyKeyboardRemove()
     )
 
@@ -368,8 +370,9 @@ async def on_view_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     text, markup = _view_status(view)
     try:
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
-    except BadRequest:  # tapping the already-selected button -> "message is not modified"
-        pass
+    except BadRequest:  # tapping the already-selected button -> "message is not modified"; nothing changed, so no preview
+        return
+    await _deliver_psi(update, context, None, preview=True)
 
 
 async def _post_init(app: Application) -> None:
