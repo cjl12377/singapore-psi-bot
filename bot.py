@@ -17,6 +17,7 @@ from telegram import (
     Update,
 )
 from telegram.constants import ChatType, ParseMode
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -28,6 +29,7 @@ from telegram.ext import (
 
 import alerts
 import analytics
+import prefs
 from location import locate
 from psi import (
     format_psi_caption,
@@ -92,6 +94,7 @@ COMMANDS_TEXT = (
     "/psi — current PSI across Singapore\n"
     "/location — PSI for where you are (or just send a location)\n"
     "/alert — get notified when air quality changes\n"
+    "/view — choose map or text for /psi\n"
     "/help — show this message"
 )
 
@@ -233,7 +236,8 @@ async def _deliver_psi(
 
     area, region = place if place else (None, None)
     token, chat_id = context.bot.token, update.effective_chat.id
-    png = await _render_map(data, area)
+    wants_map = await prefs.get_view(user_id) == prefs.VIEW_MAP
+    png = await _render_map(data, area) if wants_map else None
     if png:
         # 1) map embedded in a rich message; 2) map as a plain photo + caption
         if await _send_rich(token, chat_id,
@@ -326,12 +330,52 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+def _view_status(view: str) -> tuple[str, InlineKeyboardMarkup]:
+    mark = lambda v: "✅ " if view == v else ""
+    text = (
+        "How should /psi look?\n\n"
+        "🗺 <b>Map</b> — a map of Singapore with each region's PSI colour-coded.\n"
+        "📝 <b>Text</b> — a plain table, lighter on data.\n\n"
+        f"Currently: <b>{'Map' if view == prefs.VIEW_MAP else 'Text'}</b>"
+    )
+    return text, InlineKeyboardMarkup([[
+        InlineKeyboardButton(f"{mark(prefs.VIEW_MAP)}🗺 Map", callback_data="view:map"),
+        InlineKeyboardButton(f"{mark(prefs.VIEW_TEXT)}📝 Text", callback_data="view:text"),
+    ]])
+
+
+async def cmd_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text, markup = _view_status(await prefs.get_view(str(update.effective_user.id)))
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+
+
+async def on_view_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    view = query.data.removeprefix("view:")
+    if view not in (prefs.VIEW_MAP, prefs.VIEW_TEXT):
+        await query.answer()
+        return
+    try:
+        await prefs.set_view(str(update.effective_user.id), view)
+    except Exception as exc:
+        logger.warning("view preference write failed: %s", type(exc).__name__)
+        await query.answer("Couldn't save that — try again in a bit.", show_alert=True)
+        return
+    await query.answer("Saved")
+    text, markup = _view_status(view)
+    try:
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+    except BadRequest:  # tapping the already-selected button -> "message is not modified"
+        pass
+
+
 async def _post_init(app: Application) -> None:
     # /stats is deliberately absent so it never shows in Telegram's command menu.
     await app.bot.set_my_commands([
         BotCommand("psi", "Current PSI across Singapore"),
         BotCommand("location", "PSI for where you are"),
         BotCommand("alert", "Get notified when air quality changes"),
+        BotCommand("view", "Choose map or text for /psi"),
         BotCommand("help", "Show available commands"),
         BotCommand("start", "About this bot"),
     ])
@@ -349,6 +393,8 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.LOCATION & filters.UpdateType.MESSAGE, on_location))
     app.add_handler(CommandHandler("alert", cmd_alert))
     app.add_handler(CallbackQueryHandler(on_alert_button, pattern=r"^alt:"))
+    app.add_handler(CommandHandler("view", cmd_view))
+    app.add_handler(CallbackQueryHandler(on_view_button, pattern=r"^view:"))
     app.job_queue.run_repeating(alerts.run_alert_check, interval=1800, first=60)
 
     logger.info("Starting webhook on port %d → %s/webhook", PORT, WEBHOOK_URL)

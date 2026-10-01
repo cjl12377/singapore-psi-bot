@@ -39,3 +39,5 @@ Edit `format_psi_rich()`, then render locally with a sample payload (`{"data":{"
 - `rich_message` JSON: `{"markdown": "...![PSI by region](tg://photo?id=map)", "media": [{"id": "map", "media": {"type": "photo", "media": "attach://map.png"}}]}`, plus a `map.png` file part. Verified live; the `id` field and nested `media` object are required (error text: `Can't find field "id"`, `Field "media" must be of type Object`).
 - `attach://` directly in the markdown fails with `RICH_MESSAGE_PHOTO_URL_INVALID`; it must go through `tg://photo?id=`.
 - Fallback chain in `_deliver_psi`: rich + map -> `sendPhoto` + HTML caption (`format_psi_caption`) -> rich table -> HTML.
+- Size: the PNG is delivered at 720 px wide as an 8-bit palette image (~21 KB; `_to_palette` keeps every flat colour exact, because plain median-cut merges the severity badge colours).
+- Users choose map vs text via `/view` (`prefs.py`, Redis hash `psi:pref:{user_id}`, default map). Text view skips rendering and sends the rich table.

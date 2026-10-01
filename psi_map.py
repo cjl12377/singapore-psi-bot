@@ -24,7 +24,9 @@ _UNKNOWN = ("#E0E0E0", "#757575", "#FFFFFF")
 _SEA = "#E6EFF5"
 _INK = "#1F2933"
 _SCALE = 2  # draw at 2x, downsample for smooth edges
-_WIDTH, _HEIGHT = 900, 560
+_WIDTH, _HEIGHT = 900, 560  # layout coordinate space
+_OUT_WIDTH = 720  # delivered pixel width; smaller = fewer bytes
+_PALETTE_SIZE = 48
 _PAD = 28
 _LEGEND_H = 56
 
@@ -147,7 +149,26 @@ def render_psi_map(psi: dict, highlight_area: Optional[str] = None) -> bytes:
         draw.text((x + 22 * s, ly), text, font=leg_font, fill=_INK, anchor="lm")
         x += w + gap
 
-    out = img.resize((_WIDTH, _HEIGHT), Image.LANCZOS)
+    out = img.resize((_OUT_WIDTH, round(_HEIGHT * _OUT_WIDTH / _WIDTH)), Image.LANCZOS)
     buf = io.BytesIO()
-    out.save(buf, format="PNG", optimize=True)
+    _to_palette(out).save(buf, format="PNG", optimize=True)
     return buf.getvalue()
+
+
+def _rgb(hex_colour: str) -> tuple[int, int, int]:
+    return tuple(int(hex_colour[i:i + 2], 16) for i in (1, 3, 5))
+
+
+_FLAT = sorted({_rgb(c) for pair in [*_BAND_COLOURS.values(), _UNKNOWN] for c in pair}
+               | {_rgb(_SEA), _rgb(_INK), _rgb("#FFFFFF")})
+
+
+def _to_palette(img: Image.Image) -> Image.Image:
+    """8-bit palette PNG. Every flat colour is kept exactly (plain median-cut merges the
+    similar severity badge colours); the rest of the palette is adaptive, for smooth edges."""
+    adaptive = img.quantize(colors=_PALETTE_SIZE - len(_FLAT), method=Image.Quantize.MEDIANCUT,
+                            dither=Image.Dither.NONE).getpalette()
+    flat = [c for rgb in _FLAT for c in rgb]
+    pal = Image.new("P", (1, 1))
+    pal.putpalette((flat + adaptive[:3 * (_PALETTE_SIZE - len(_FLAT))])[:768])
+    return img.quantize(palette=pal, dither=Image.Dither.NONE)
