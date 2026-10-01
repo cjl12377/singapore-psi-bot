@@ -17,7 +17,7 @@ description: How the singapore-psi-bot formats /psi readings as Telegram rich me
 3. `**{Band}** · {subtitle}` — worst region ("highest of 5") for `/psi`, or `📍 {area} · {Region} region` for a location lookup.
 4. `*🕐 Updated {timestamp}*`, then `---`.
 5. `### Regional breakdown` — table: Region | PSI | Level. Headline region marked `◀`. (There used to be a 0–100 `█░` Scale bar; removed because it saturated at 100.)
-6. `### PSI guide` — band legend table (emoji + level, range right-aligned).
+6. `### PSI Categories` — band legend table (emoji + level, range right-aligned).
 
 ## Conventions
 - Band emoji come from `PSI_BANDS`: 🟢 Good, 🟡 Moderate, 🟠 Unhealthy, 🔴 Very Unhealthy, 🟣 Hazardous. Use `psi_category()`; never hardcode thresholds elsewhere.
@@ -41,4 +41,4 @@ Edit `format_psi_rich()`, then render locally with a sample payload (`{"data":{"
 - Fallback chain in `_deliver_psi`: rich + map -> `sendPhoto` + HTML caption (`format_psi_caption`) -> rich table -> HTML.
 - Size: the PNG is delivered at 720 px wide as an 8-bit palette image (~21 KB; `_to_palette` keeps every flat colour exact, because plain median-cut merges the severity badge colours).
 - Users choose map vs text via `/view` (`prefs.py`, Redis hash `psi:pref:{user_id}`, default map). Text view skips rendering and sends the rich table.
-- NEA advisory: `### NEA advisory` section (map view: below the map; text view: between the table and the guide) for the headline category, from `psi.ADVICE` — verbatim NEA wording, shared with the alerts (`alerts.format_alert`). Also in the photo caption and HTML fallback. Never reword it.
+- Health warnings: `### PSI Health Warnings as per NEA` section (map view: below the map; text view: between the table and the guide) for the headline category, from `psi.ADVICE` — verbatim NEA wording, shared with the alerts (`alerts.format_alert`). Also in the photo caption and HTML fallback. Never reword it.

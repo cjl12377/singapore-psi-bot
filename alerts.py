@@ -54,7 +54,7 @@ def format_alert(old: str, new: str, value: int, region: str) -> str:
         f"\n"
         f"{opening_line(old, new)}\n"
         f"\n"
-        f"<b>NEA advisory</b>\n"
+        f"<b>PSI Health Warnings as per NEA</b>\n"
         f"{advice_block(new)}\n"
         f"\n"
         f"<i>/alert to turn these off</i>"

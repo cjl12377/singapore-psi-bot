@@ -181,7 +181,7 @@ def _format(data: dict, stale_reason: Optional[str], region: Optional[str], area
             f"<b>Regional Breakdown</b>\n"
             f"{region_lines}\n"
             f"\n"
-            f"<b>NEA advisory</b>\n{advice_block(category)}\n"
+            f"<b>PSI Health Warnings as per NEA</b>\n{advice_block(category)}\n"
             f"\n"
             f"<blockquote><pre>{legend_header}\n{legend_rows}</pre></blockquote>"
         )
@@ -215,7 +215,7 @@ def format_psi_caption(
             f"{banner}{emoji} <b>PSI {headline_psi} — {category}</b>\n"
             f"{subtitle}\n"
             f"<i>🕐 Updated {updated}</i>\n\n"
-            f"<b>NEA advisory</b>\n{advice_block(category)}"
+            f"<b>PSI Health Warnings as per NEA</b>\n{advice_block(category)}"
         )
     except (KeyError, IndexError, TypeError, ValueError):
         return "Error parsing PSI data. The API response format may have changed."
@@ -263,7 +263,7 @@ def format_psi_rich(
             f"**{category}** · {subtitle}\n"
             f"*🕐 Updated {updated}*\n\n"
         )
-        advisory = f"### NEA advisory\n\n{advice_markdown(category)}\n\n"
+        advisory = f"### PSI Health Warnings as per NEA\n\n{advice_markdown(category)}\n\n"
         if map_id:
             return f"{head}![PSI by region](tg://photo?id={map_id})\n\n{advisory.rstrip()}"
 
@@ -275,7 +275,7 @@ def format_psi_rich(
             f"|:--|--:|:--|\n"
             f"{rows}\n\n"
             f"{advisory}"
-            f"### PSI guide\n\n"
+            f"### PSI Categories\n\n"
             f"| Level | PSI range |\n"
             f"|:--|--:|\n"
             f"{legend}"
