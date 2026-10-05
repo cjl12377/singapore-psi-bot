@@ -1,9 +1,9 @@
 import asyncio
+import hashlib
 import json
 import logging
 import math
 import os
-import secrets
 import time
 
 import httpx
@@ -56,7 +56,9 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 WEBHOOK_URL = os.environ["WEBHOOK_URL"].rstrip("/")
 PORT = int(os.environ.get("PORT", 8443))
-WEBHOOK_SECRET = secrets.token_urlsafe(32)
+# Derived from the token so it's the same on every boot: during a deploy the old and new
+# instances accept the same secret, instead of the old one 403ing until it shuts down.
+WEBHOOK_SECRET = hashlib.sha256(f"webhook-secret:{BOT_TOKEN}".encode()).hexdigest()
 ADMIN_USER_ID = int(os.environ["ADMIN_USER_ID"])
 
 USER_COOLDOWN_SECS = 30
@@ -305,38 +307,55 @@ ALERT_EXPLAINER = (
 )
 
 
-def _alert_status(on: bool, extra: str = "") -> tuple[str, InlineKeyboardMarkup]:
+async def _answer(query, text: str | None = None, show_alert: bool = False) -> None:
+    """Answer a button tap without letting an expired query abort the handler. Telegram
+    only accepts an answer for a short while; a tap that woke the service from sleep
+    is often older than that, but the rest of the handler can still do its work."""
+    try:
+        await query.answer(text, show_alert=show_alert)
+    except BadRequest as exc:
+        logger.info("button answer skipped: %s", exc.message)
+
+
+def _alert_status(owner: str, on: bool, extra: str = "") -> tuple[str, InlineKeyboardMarkup]:
+    """The button carries the owner's user ID, so in a group only whoever sent /alert can use it."""
     if on:
         text = f"🔔 Alerts are <b>on</b>.\n\n{ALERT_EXPLAINER}{extra}"
-        button = InlineKeyboardButton("🔕 Turn off alerts", callback_data="alt:off")
+        button = InlineKeyboardButton("🔕 Turn off alerts", callback_data=f"alt:off:{owner}")
     else:
         text = f"🔕 Alerts are <b>off</b>.\n\n{ALERT_EXPLAINER}{extra}"
-        button = InlineKeyboardButton("🔔 Turn on alerts", callback_data="alt:on")
+        button = InlineKeyboardButton("🔔 Turn on alerts", callback_data=f"alt:on:{owner}")
     return text, InlineKeyboardMarkup([[button]])
 
 
 async def cmd_alert(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    on = await alerts.is_subscribed(str(update.effective_user.id))
-    text, markup = _alert_status(on)
+    user_id = str(update.effective_user.id)
+    text, markup = _alert_status(user_id, await alerts.is_subscribed(user_id))
     await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
 
 
 async def on_alert_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    await query.answer()
     user_id = str(update.effective_user.id)
+    # "alt:on:<owner>"; buttons sent before owners were added have no owner part.
+    action, _, owner = query.data.removeprefix("alt:").partition(":")
+    if owner and owner != user_id:
+        await _answer(query, "This button belongs to whoever sent /alert — send /alert to set your own.",
+                      show_alert=True)
+        return
+    await _answer(query)
 
-    if query.data == "alt:off":
+    if action == "off":
         await alerts.unsubscribe(user_id)
-        text, markup = _alert_status(False)
-    elif query.data == "alt:on":
+        text, markup = _alert_status(user_id, False)
+    elif action == "on":
         reading = await alerts.current_reading()
         if reading is None:
             await query.edit_message_text("Couldn't reach data.gov.sg just now — please try /alert again in a bit.")
             return
         category, value, _ = reading
         await alerts.subscribe(user_id, query.message.chat_id, category)
-        text, markup = _alert_status(True, f"\n\nRight now: <b>{category}</b> (PSI {value}).")
+        text, markup = _alert_status(user_id, True, f"\n\nRight now: <b>{category}</b> (PSI {value}).")
     else:
         return
 
@@ -421,6 +440,13 @@ async def cmd_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                                     reply_markup=_keyboard(update))
 
 
+async def _cancel_feedback_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """A command, the PSI button or a location ends a pending /feedback prompt, so a
+    user who moved on doesn't have their next chat message filed as feedback.
+    Runs before the regular handlers; a fresh /feedback then sets a new prompt."""
+    _awaiting_feedback.pop(str(update.effective_user.id), None)
+
+
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Plain text in a private chat: feedback if /feedback asked for it, otherwise ignored."""
     deadline = _awaiting_feedback.pop(str(update.effective_user.id), None)
@@ -478,21 +504,44 @@ async def on_view_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     query = update.callback_query
     view = query.data.removeprefix("view:")
     if view not in (prefs.VIEW_MAP, prefs.VIEW_TEXT):
-        await query.answer()
+        await _answer(query)
         return
     try:
         await prefs.set_view(str(update.effective_user.id), view)
     except Exception as exc:
         logger.warning("view preference write failed: %s", type(exc).__name__)
-        await query.answer("Couldn't save that — try again in a bit.", show_alert=True)
+        await _answer(query, "Couldn't save that — try again in a bit.", show_alert=True)
         return
-    await query.answer("Saved")
+    await _answer(query, "Saved")
     text, markup = _view_status(view)
     try:
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
     except BadRequest:  # tapping the already-selected button -> "message is not modified"; nothing changed, so no preview
         return
     await _deliver_psi(update, context, None, preview=True)
+
+
+ERROR_REPLY = "Something went wrong on my end — please try again in a bit."
+
+
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Last resort for exceptions a handler didn't catch (e.g. Redis unreachable):
+    log it and tell the user, rather than leaving them with no reply."""
+    logger.error("Unhandled error: %s", type(context.error).__name__, exc_info=context.error)
+    if not isinstance(update, Update) or update.effective_chat is None:
+        return  # a job, or an update we'd never reply to
+    try:
+        if update.callback_query:
+            try:
+                await update.callback_query.answer(ERROR_REPLY, show_alert=True)
+                return
+            except BadRequest:  # already answered by the handler
+                pass
+            await update.effective_chat.send_message(ERROR_REPLY)
+        elif update.message:
+            await update.message.reply_text(ERROR_REPLY)
+    except Exception as exc:
+        logger.warning("error reply failed: %s", type(exc).__name__)
 
 
 # The bot profile's "About" (max 120 chars) and the intro shown in an empty chat
@@ -571,6 +620,10 @@ def main() -> None:
     # tapping 🌫 Check PSI is never captured as feedback.
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE & filters.UpdateType.MESSAGE, on_text))
+    app.add_handler(MessageHandler(
+        (filters.COMMAND | filters.LOCATION | filters.Text([PSI_BUTTON])) & filters.UpdateType.MESSAGE,
+        _cancel_feedback_prompt), group=-1)
+    app.add_error_handler(on_error)
     app.job_queue.run_repeating(alerts.run_alert_check, interval=1800, first=60)
 
     logger.info("Starting webhook on port %d → %s/webhook", PORT, WEBHOOK_URL)

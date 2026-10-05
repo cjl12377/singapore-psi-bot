@@ -1,9 +1,10 @@
+import asyncio
 import logging
 import time
 from typing import Optional
 
 from telegram.constants import ParseMode
-from telegram.error import Forbidden
+from telegram.error import Forbidden, RetryAfter
 from telegram.ext import ContextTypes
 
 from analytics import redis_client
@@ -16,6 +17,8 @@ USERS_KEY = "psi:alert_users"
 # hour. Worsening always goes out; an improvement within this window of the
 # last alert is held back until the reading has settled.
 IMPROVEMENT_COOLDOWN_SECS = 3 * 3600
+# Telegram allows about 30 messages/s across chats; pace the broadcast well under that.
+SEND_INTERVAL_SECS = 0.05
 
 CATEGORY_RANK = {label: i for i, (_, _, label, _) in enumerate(PSI_BANDS)}
 BAD_CATEGORIES = {"Unhealthy", "Very Unhealthy", "Hazardous"}
@@ -119,13 +122,19 @@ async def run_alert_check(context: ContextTypes.DEFAULT_TYPE) -> None:
         if not should_alert(old, category, float(sub.get("last_alert_at", 0)), now):
             continue
         try:
-            await context.bot.send_message(
-                int(sub["chat_id"]),
-                format_alert(old, category, value, region),
-                parse_mode=ParseMode.HTML,
-            )
+            await _send_alert(context.bot, int(sub["chat_id"]), format_alert(old, category, value, region))
             await redis_client.hset(_key(uid), mapping={"last_category": category, "last_alert_at": now})
         except Forbidden:
             await unsubscribe(uid)  # user blocked the bot
         except Exception:
-            logger.exception("Alert delivery failed")
+            logger.exception("Alert delivery failed")  # not recorded, so retried next check
+        await asyncio.sleep(SEND_INTERVAL_SECS)
+
+
+async def _send_alert(bot, chat_id: int, text: str) -> None:
+    """One send; if Telegram says to slow down, wait as told and try once more."""
+    try:
+        await bot.send_message(chat_id, text, parse_mode=ParseMode.HTML)
+    except RetryAfter as exc:
+        await asyncio.sleep(exc.retry_after)
+        await bot.send_message(chat_id, text, parse_mode=ParseMode.HTML)

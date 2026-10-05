@@ -120,6 +120,12 @@ class SubmitTest(FeedbackTestCase):
         await bot.on_text(fake_update(7, "too late"), fake_context())
         self.assertEqual(await self.stored(), [])
 
+    async def test_cancelled_prompt_ignores_next_text(self):
+        await bot.cmd_feedback(fake_update(7, "/feedback"), fake_context())
+        await bot._cancel_feedback_prompt(fake_update(7, "/psi"), fake_context())
+        await bot.on_text(fake_update(7, "hello"), fake_context())
+        self.assertEqual(await self.stored(), [])
+
     async def test_prompt_is_per_user(self):
         await bot.cmd_feedback(fake_update(7, "/feedback"), fake_context())
         await bot.on_text(fake_update(8, "not mine"), fake_context())
@@ -296,6 +302,19 @@ class RoutingTest(unittest.TestCase):
         }}, self.app.bot)
         (capture,) = [h for h in self.app.handlers[0] if h.callback is bot.on_text]
         self.assertFalse(capture.check_update(upd))
+
+    def test_other_actions_cancel_a_pending_prompt(self):
+        def update(**msg):
+            return TgUpdate.de_json({"update_id": 1, "message": {
+                "message_id": 1, "date": 0, "chat": {"id": 5, "type": "private"},
+                "from": {"id": 5, "is_bot": False, "first_name": "u"}, **msg}}, self.app.bot)
+        (cancel,) = self.app.handlers[-1]  # runs before the regular handlers
+        self.assertIs(cancel.callback, bot._cancel_feedback_prompt)
+        command = update(text="/psi", entities=[{"type": "bot_command", "offset": 0, "length": 4}])
+        for upd in (command, update(text=bot.PSI_BUTTON),
+                    update(location={"latitude": 1.3, "longitude": 103.9})):
+            self.assertTrue(cancel.check_update(upd))
+        self.assertFalse(cancel.check_update(update(text="my feedback")))
 
     def test_commands_registered(self):
         commands = {next(iter(h.commands)): h.callback

@@ -26,12 +26,14 @@ Try it: [@Haze_SGbot](https://t.me/Haze_SGbot)
 
 Design notes:
 
-- **Webhook only.** Updates arrive at `/webhook`, authenticated with a `secret_token` generated at each boot. Requests without it get a 403.
+- **Webhook only.** Updates arrive at `/webhook`, authenticated with a `secret_token` derived from the bot token, so it stays the same across restarts and deploys. Requests without it get a 403.
 - **Token-safe logging.** `httpx` logging is raised to WARNING, since Telegram API URLs contain the bot token.
 - **Rate limiting.** A 30-second per-user cooldown on PSI requests, including the preview after a `/view` change. The first blocked request gets one "please wait" notice that deletes itself; further attempts in the same window are ignored.
 - **Concurrency.** Updates are handled in parallel. Rendered maps are cached per reading (at most 56: one per planning area plus the plain map), and only one data.gov.sg fetch runs at a time, so a burst of requests at cache expiry makes one call, not many.
 - **Stale data.** If data.gov.sg is unreachable, `/psi` serves the last cached reading with a banner explaining why. After a failed fetch the bot waits 60 seconds before retrying, so an outage doesn't make every request wait out the timeout.
 - **Alert flapping guard.** A reading hovering on a band edge (100 ↔ 101) could otherwise alert every hour. Worsening alerts go out immediately; an improvement within 3 hours of the last alert waits until the reading settles.
+- **Alert delivery.** Alerts go out at most 20 a second, under Telegram's ~30/s limit. If Telegram still asks the bot to slow down, it waits the time Telegram gives and retries once; anything that still fails is retried at the next check.
+- **Error replies.** If a handler fails unexpectedly (e.g. Redis is unreachable), the error is logged and the user is told to try again, rather than getting no reply.
 - **Location privacy.** Coordinates are used once to find the planning area and are never logged or stored.
 
 ### Region mapping
