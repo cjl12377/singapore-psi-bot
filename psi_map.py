@@ -23,12 +23,15 @@ _UNKNOWN = ("#E0E0E0", "#757575", "#FFFFFF")
 
 _SEA = "#E6EFF5"
 _INK = "#1F2933"
+_MUTED = "#6B7785"
+_KEY = "#4A5560"  # neutral sample badge in the legend
+_DIVIDER = "#D5DEE6"
 _SCALE = 2  # draw at 2x, downsample for smooth edges
 _WIDTH, _HEIGHT = 900, 560  # layout coordinate space
 _OUT_WIDTH = 720  # delivered pixel width; smaller = fewer bytes
 _PALETTE_SIZE = 48
 _PAD = 28
-_LEGEND_H = 56
+_LEGEND_H = 84
 
 _lons = [x for a in _AREAS for ring in a["rings"] for x, _ in ring]
 _lats = [y for a in _AREAS for ring in a["rings"] for _, y in ring]
@@ -96,8 +99,11 @@ def _centered_text(draw, xy, text, font, fill) -> None:
     draw.text(xy, text, font=font, fill=fill, anchor="mm")
 
 
-def render_psi_map(psi: dict, highlight_area: Optional[str] = None) -> bytes:
-    """psi: {region: value}. highlight_area: planning area to outline (location lookups)."""
+def render_psi_map(psi: dict, highlight_area: Optional[str] = None,
+                   pm25: Optional[dict] = None) -> bytes:
+    """psi: {region: 24-hr PSI}. pm25: {region: 1-hr PM2.5}; when given, the badge shows
+    PM2.5 with the PSI beneath it (colours stay on the PSI band). highlight_area: planning
+    area to outline (location lookups)."""
     s = _SCALE
     img = Image.new("RGB", (_WIDTH * s, _HEIGHT * s), _SEA)
     draw = ImageDraw.Draw(img)
@@ -117,37 +123,31 @@ def render_psi_map(psi: dict, highlight_area: Optional[str] = None) -> bytes:
                     pts = [_project(x, y) for x, y in ring]
                     draw.line(pts + [pts[0]], fill=_INK, width=3 * s, joint="curve")
 
-    name_font, value_font = _font(15 * s), _font(30 * s)
+    name_font, value_font, sub_font = _font(15 * s), _font(30 * s), _font(14 * s)
     for region, (lon, lat) in _ANCHORS.items():
         if region not in psi:
             continue
         label = psi_category(psi[region])[0]
         _, badge, text_col = _BAND_COLOURS.get(label, _UNKNOWN)
         x, y = _project(lon, lat)
-        val = str(psi[region])
-        vw = draw.textlength(val, font=value_font)
-        bw, bh = max(vw + 28 * s, 64 * s), 44 * s
+        two_line = bool(pm25 and region in pm25)
+        val = str(pm25[region]) if two_line else str(psi[region])
+        sub = f"PSI {psi[region]}"
+        vw = max(draw.textlength(val, font=value_font),
+                 draw.textlength(sub, font=sub_font) if two_line else 0)
+        bw, bh = max(vw + 28 * s, 64 * s), (58 if two_line else 44) * s
         draw.rounded_rectangle(
             (x - bw / 2, y - bh / 2, x + bw / 2, y + bh / 2),
-            radius=bh / 2, fill=badge, outline="#FFFFFF", width=2 * s,
+            radius=min(bh / 2, 22 * s), fill=badge, outline="#FFFFFF", width=2 * s,
         )
-        _centered_text(draw, (x, y), val, value_font, text_col)
+        if two_line:
+            _centered_text(draw, (x, y - 7 * s), val, value_font, text_col)
+            _centered_text(draw, (x, y + 17 * s), sub, sub_font, text_col)
+        else:
+            _centered_text(draw, (x, y), val, value_font, text_col)
         _centered_text(draw, (x, y - bh / 2 - 12 * s), region.upper(), name_font, _INK)
 
-    # Legend strip along the bottom
-    ly = (_HEIGHT - _LEGEND_H / 2 - 4) * s
-    leg_font = _font(13 * s)
-    items = [
-        (_BAND_COLOURS[{"V. Unhealthy": "Very Unhealthy"}.get(label, label)][1], f"{label} {rng}")
-        for _, label, rng in LEGEND_ROWS
-    ]
-    gap = 22 * s
-    widths = [24 * s + draw.textlength(t, font=leg_font) for _, t in items]
-    x = (_WIDTH * s - (sum(widths) + gap * (len(items) - 1))) / 2
-    for (badge, text), w in zip(items, widths):
-        draw.ellipse((x, ly - 7 * s, x + 14 * s, ly + 7 * s), fill=badge)
-        draw.text((x + 22 * s, ly), text, font=leg_font, fill=_INK, anchor="lm")
-        x += w + gap
+    _draw_legend(draw, bool(pm25))
 
     out = img.resize((_OUT_WIDTH, round(_HEIGHT * _OUT_WIDTH / _WIDTH)), Image.LANCZOS)
     buf = io.BytesIO()
@@ -155,12 +155,61 @@ def render_psi_map(psi: dict, highlight_area: Optional[str] = None) -> bytes:
     return buf.getvalue()
 
 
+_BANDS = [(_BAND_COLOURS[{"V. Unhealthy": "Very Unhealthy"}.get(label, label)][1], label, rng)
+          for _, label, rng in LEGEND_ROWS]
+
+
+def _key_badge(draw, cx: float, cy: float, s: int) -> float:
+    """Neutral sample badge (PM2.5 over PSI) with labels to its right. Returns right edge x."""
+    bw, bh = 70 * s, 52 * s
+    draw.rounded_rectangle((cx - bw / 2, cy - bh / 2, cx + bw / 2, cy + bh / 2),
+                           radius=20 * s, fill=_KEY)
+    top_y, bot_y = cy - 8 * s, cy + 14 * s
+    _centered_text(draw, (cx, top_y), "PM2.5", _font(18 * s), "#FFFFFF")
+    _centered_text(draw, (cx, bot_y), "PSI", _font(12 * s), "#FFFFFF")
+    tx = cx + bw / 2 + 12 * s
+    f1, f2 = _font(14 * s), _font(12 * s)
+    draw.text((tx, top_y), "1-hr PM2.5 (µg/m³)", font=f1, fill=_INK, anchor="lm")
+    draw.text((tx, bot_y), "24-hr PSI (rolling)", font=f2, fill=_MUTED, anchor="lm")
+    return tx + max(draw.textlength("1-hr PM2.5 (µg/m³)", font=f1),
+                    draw.textlength("24-hr PSI (rolling)", font=f2))
+
+
+def _draw_legend(draw, has_pm25: bool) -> None:
+    """Bottom strip: sample badge (what the two badge numbers mean), then a PSI colour bar."""
+    s = _SCALE
+    mid = (_HEIGHT - _LEGEND_H / 2 - 10) * s
+    name_f, rng_f, cap_f = _font(13 * s), _font(12 * s), _font(11 * s)
+
+    left = 36 * s
+    if has_pm25:
+        right = _key_badge(draw, left + 35 * s, mid, s)
+        bx0 = right + 26 * s
+        draw.line((bx0 - 13 * s, mid - 22 * s, bx0 - 13 * s, mid + 22 * s), fill=_DIVIDER, width=s)
+    else:
+        bx0 = left
+    bx1 = (_WIDTH - 36) * s
+    draw.text((bx0, mid - 26 * s), "PSI LEVEL", font=cap_f, fill=_MUTED, anchor="lm")
+
+    # Segmented colour bar, name under each segment, range inside
+    bar_h, gap = 16 * s, 4 * s
+    seg_w = (bx1 - bx0 - gap * 4) / 5
+    by = mid - 6 * s
+    for i, (colour, label, rng) in enumerate(_BANDS):
+        sx = bx0 + i * (seg_w + gap)
+        draw.rounded_rectangle((sx, by - bar_h / 2, sx + seg_w, by + bar_h / 2),
+                               radius=bar_h / 2, fill=colour)
+        _centered_text(draw, (sx + seg_w / 2, by), rng, rng_f,
+                       "#2B2B2B" if label == "Moderate" else "#FFFFFF")
+        _centered_text(draw, (sx + seg_w / 2, by + 22 * s), label, name_f, _INK)
+
+
 def _rgb(hex_colour: str) -> tuple[int, int, int]:
     return tuple(int(hex_colour[i:i + 2], 16) for i in (1, 3, 5))
 
 
 _FLAT = sorted({_rgb(c) for pair in [*_BAND_COLOURS.values(), _UNKNOWN] for c in pair}
-               | {_rgb(_SEA), _rgb(_INK), _rgb("#FFFFFF")})
+               | {_rgb(c) for c in (_SEA, _INK, _MUTED, _KEY, _DIVIDER, "#FFFFFF")})
 
 
 def _to_palette(img: Image.Image) -> Image.Image:

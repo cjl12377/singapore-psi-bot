@@ -183,8 +183,9 @@ async def _send_rich(token: str, chat_id: int, markdown: str, png: bytes | None 
 
 async def _render_map(data: dict, area: str | None) -> bytes | None:
     try:
-        psi = data["data"]["items"][0]["readings"]["psi_twenty_four_hourly"]
-        return await asyncio.to_thread(render_psi_map, psi, area)
+        readings = data["data"]["items"][0]["readings"]
+        return await asyncio.to_thread(render_psi_map, readings["psi_twenty_four_hourly"], area,
+                                       readings.get("pm25_one_hourly"))
     except Exception as exc:
         logger.warning("PSI map render failed: %s", type(exc).__name__)
         return None

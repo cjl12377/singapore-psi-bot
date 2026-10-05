@@ -6,6 +6,7 @@ from typing import Optional
 import httpx
 
 PSI_API_URL = "https://api-open.data.gov.sg/v2/real-time/api/psi"
+PM25_API_URL = "https://api-open.data.gov.sg/v2/real-time/api/pm25"
 CACHE_TTL = 600  # 10 minutes — API updates hourly, so this is conservative
 
 _cache: dict = {"data": None, "timestamp": 0.0, "stale_reason": None}
@@ -45,6 +46,18 @@ def _classify_error(exc: Exception) -> str:
     return f"unexpected error: {type(exc).__name__}"
 
 
+async def _attach_pm25(client: httpx.AsyncClient, data: dict) -> None:
+    """The PSI endpoint has no 1-hour PM2.5; it lives on its own endpoint. Merge it into
+    the PSI reading as readings["pm25_one_hourly"]. Best effort: absent -> PSI headline."""
+    try:
+        resp = await client.get(PM25_API_URL)
+        resp.raise_for_status()
+        pm25 = resp.json()["data"]["items"][0]["readings"]["pm25_one_hourly"]
+        data["data"]["items"][0]["readings"]["pm25_one_hourly"] = pm25
+    except Exception:
+        pass
+
+
 async def get_psi_data() -> tuple[Optional[dict], Optional[str]]:
     """Returns (data, stale_reason). stale_reason is None when data is fresh."""
     now = time.time()
@@ -56,6 +69,7 @@ async def get_psi_data() -> tuple[Optional[dict], Optional[str]]:
             resp = await client.get(PSI_API_URL)
             resp.raise_for_status()
             data = resp.json()
+            await _attach_pm25(client, data)
             _cache["data"] = data
             _cache["timestamp"] = now
             _cache["stale_reason"] = None
@@ -128,6 +142,16 @@ def worst_region(data: dict) -> tuple[str, int]:
     return max(psi.items(), key=lambda kv: kv[1])
 
 
+def headline(data: dict, region: Optional[str]) -> tuple[str, int, Optional[int]]:
+    """(region, 24-hr PSI, 1-hr PM2.5 or None). Headline region: the one picked, else the
+    highest 1-hr PM2.5 (falling back to highest PSI if PM2.5 is unavailable)."""
+    readings = data["data"]["items"][0]["readings"]
+    psi, pm25 = readings["psi_twenty_four_hourly"], readings.get("pm25_one_hourly")
+    if region is None:
+        region = max((pm25 or psi).items(), key=lambda kv: kv[1])[0]
+    return region, psi[region], (pm25[region] if pm25 else None)
+
+
 def format_psi_message(data: dict, stale_reason: Optional[str] = None) -> str:
     return _format(data, stale_reason, region=None, area=None)
 
@@ -148,17 +172,24 @@ def _format(data: dict, stale_reason: Optional[str], region: Optional[str], area
         updated = _fmt_timestamp(latest.get("updatedTimestamp", ""))
         psi = latest["readings"]["psi_twenty_four_hourly"]
 
+        headline_region, headline_psi, headline_pm25 = headline(data, region)
+        pm25 = latest["readings"].get("pm25_one_hourly")
         if region is None:
-            headline_region, headline_psi = worst_region(data)
             subtitle = f"{headline_region.capitalize()} region, highest of 5"
         else:
-            headline_region, headline_psi = region, psi[region]
             subtitle = f"📍 {area} · {region.capitalize()} region"
         category, emoji = psi_category(headline_psi)
+        if headline_pm25 is not None:
+            title = (f"{emoji} <b>PM2.5 {headline_pm25} µg/m³</b> (1-hr)\n"
+                     f"<b>PSI {headline_psi} — {category}</b> (24-hr)")
+        else:
+            title = f"{emoji} <b>PSI {headline_psi} — {category}</b>"
 
         region_lines = "\n".join(
-            f"{psi_category(psi[region])[1]} {region.capitalize()} — {psi[region]}"
-            for region in REGIONS
+            f"{psi_category(psi[r])[1]} {r.capitalize()} — "
+            + (f"PM2.5 {pm25[r]} · " if pm25 else "")
+            + f"PSI {psi[r]}"
+            for r in REGIONS
         )
 
         legend_header = f"{'':<16}{'PSI Range':>9}"
@@ -175,7 +206,7 @@ def _format(data: dict, stale_reason: Optional[str], region: Optional[str], area
             f"{stale_banner}"
             f"🕐 <i>Last updated: {updated}</i>\n"
             f"\n"
-            f"{emoji} <b>PSI {headline_psi} — {category}</b>\n"
+            f"{title}\n"
             f"<i>{subtitle}</i>\n"
             f"\n"
             f"<b>Regional Breakdown</b>\n"
@@ -200,19 +231,23 @@ def format_psi_caption(
         latest = data["data"]["items"][0]
         updated = _fmt_timestamp(latest.get("updatedTimestamp", ""))
         psi = latest["readings"]["psi_twenty_four_hourly"]
+        headline_region, headline_psi, headline_pm25 = headline(data, region)
         if region is None:
-            headline_region, headline_psi = worst_region(data)
             subtitle = f"{headline_region.capitalize()} region · highest of 5"
         else:
-            headline_psi = psi[region]
             subtitle = f"📍 {area} · {region.capitalize()} region"
         category, emoji = psi_category(headline_psi)
+        if headline_pm25 is not None:
+            title = (f"{emoji} <b>PM2.5 {headline_pm25} µg/m³</b> (1-hr)\n"
+                     f"<b>PSI {headline_psi} — {category}</b> (24-hr)")
+        else:
+            title = f"{emoji} <b>PSI {headline_psi} — {category}</b>"
         banner = (
             f"⚠️ <b>Stale data</b> — live fetch failed: {stale_reason}\n\n"
             if stale_reason else ""
         )
         return (
-            f"{banner}{emoji} <b>PSI {headline_psi} — {category}</b>\n"
+            f"{banner}{title}\n"
             f"{subtitle}\n"
             f"<i>🕐 Updated {updated}</i>\n\n"
             f"<b>PSI Health Warnings as per NEA</b>\n{advice_block(category)}"
@@ -237,19 +272,24 @@ def format_psi_rich(
         updated = _fmt_timestamp(latest.get("updatedTimestamp", ""))
         psi = latest["readings"]["psi_twenty_four_hourly"]
 
+        headline_region, headline_psi, headline_pm25 = headline(data, region)
+        pm25 = latest["readings"].get("pm25_one_hourly")
         if region is None:
-            headline_region, headline_psi = worst_region(data)
             subtitle = f"{headline_region.capitalize()} region · highest of 5"
         else:
-            headline_region, headline_psi = region, psi[region]
             subtitle = f"📍 {area} · {region.capitalize()} region"
         category, emoji = psi_category(headline_psi)
 
         rows = "\n".join(
             f"| {psi_category(psi[r])[1]} {r.capitalize()}"
             f"{' ◀' if r == headline_region else ''} "
-            f"| **{psi[r]}** | {psi_category(psi[r])[0]} |"
+            + (f"| **{pm25[r]}** " if pm25 else "")
+            + f"| {psi[r]} | {psi_category(psi[r])[0]} |"
             for r in REGIONS
+        )
+        table_head = (
+            "| Region | PM2.5 (1-hr) | PSI (24-hr) | Level |\n|:--|--:|--:|:--|"
+            if pm25 else "| Region | PSI (24-hr) | Level |\n|:--|--:|:--|"
         )
         legend = "\n".join(f"| {e} {label} | {rng} |" for e, label, rng in LEGEND_ROWS)
         banner = (
@@ -257,10 +297,16 @@ def format_psi_rich(
             if stale_reason else ""
         )
 
+        if headline_pm25 is not None:
+            title = f"# {emoji} PM2.5 {headline_pm25} µg/m³"
+            line2 = f"**1-hour reading** · {subtitle}\n**PSI {headline_psi} · {category}** (24-hr)"
+        else:
+            title = f"# {emoji} PSI {headline_psi}"
+            line2 = f"**{category}** · {subtitle}"
         head = (
             f"{banner}"
-            f"# {emoji} PSI {headline_psi}\n"
-            f"**{category}** · {subtitle}\n"
+            f"{title}\n"
+            f"{line2}\n"
             f"*🕐 Updated {updated}*\n\n"
         )
         advisory = f"### PSI Health Warnings as per NEA\n\n{advice_markdown(category)}\n\n"
@@ -271,8 +317,7 @@ def format_psi_rich(
             f"{head}"
             f"---\n\n"
             f"### Regional breakdown\n\n"
-            f"| Region | PSI | Level |\n"
-            f"|:--|--:|:--|\n"
+            f"{table_head}\n"
             f"{rows}\n\n"
             f"{advisory}"
             f"### PSI Categories\n\n"
