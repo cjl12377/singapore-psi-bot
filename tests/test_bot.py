@@ -204,6 +204,82 @@ class LocationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(deliver.await_args.kwargs["place"], ("Bedok", "east"))
 
 
+class KeyboardTest(unittest.IsolatedAsyncioTestCase):
+    """The pinned 🌫 Check PSI / 📍 Share my location bar."""
+
+    def test_layout(self):
+        (psi_btn, loc_btn), = bot.MAIN_KEYBOARD.keyboard
+        self.assertEqual(psi_btn.text, bot.PSI_BUTTON)
+        self.assertTrue(loc_btn.request_location)
+        self.assertTrue(bot.MAIN_KEYBOARD.is_persistent)
+        self.assertTrue(bot.MAIN_KEYBOARD.resize_keyboard)
+        self.assertFalse(bot.MAIN_KEYBOARD.one_time_keyboard)
+
+    def test_private_chats_only(self):
+        self.assertIs(bot._keyboard(fake_update(1, ChatType.PRIVATE)), bot.MAIN_KEYBOARD)
+        for chat_type in (ChatType.GROUP, ChatType.SUPERGROUP):
+            self.assertIsNone(bot._keyboard(fake_update(1, chat_type)))
+
+    def test_markup_param_is_json(self):
+        import json
+        self.assertEqual(bot._markup_param(None), {})
+        sent = json.loads(bot._markup_param(bot.MAIN_KEYBOARD)["reply_markup"])
+        self.assertTrue(sent["is_persistent"])
+        self.assertEqual(sent["keyboard"][0][1]["text"], bot.LOCATION_BUTTON)
+
+    async def test_start_and_help_attach_bar_in_private_only(self):
+        for handler in (bot.cmd_start, bot.cmd_help):
+            u = fake_update(1, ChatType.PRIVATE)
+            await handler(u, fake_context())
+            self.assertIs(u.message.reply_text.await_args.kwargs["reply_markup"], bot.MAIN_KEYBOARD)
+            g = fake_update(1, ChatType.GROUP)
+            await handler(g, fake_context())
+            self.assertIsNone(g.message.reply_text.await_args.kwargs["reply_markup"])
+
+    async def test_location_command(self):
+        u = fake_update(1, ChatType.PRIVATE)
+        await bot.cmd_location(u, fake_context())
+        self.assertIs(u.message.reply_text.await_args.kwargs["reply_markup"], bot.MAIN_KEYBOARD)
+        self.assertIn("📎 → Location", u.message.reply_text.await_args.args[0])
+        g = fake_update(1, ChatType.GROUP)
+        await bot.cmd_location(g, fake_context())
+        self.assertIn("private chat", g.message.reply_text.await_args.args[0])
+        self.assertNotIn("reply_markup", g.message.reply_text.await_args.kwargs)
+
+    async def test_psi_reply_carries_bar(self):
+        bot._user_last_request.clear()
+        with patch.object(bot, "get_psi_data", AsyncMock(return_value=(SAMPLE_DATA, None))), \
+             patch.object(bot.analytics, "track_request", AsyncMock()), \
+             patch.object(bot.prefs, "get_view", AsyncMock(return_value=prefs.VIEW_MAP)), \
+             patch.object(bot, "_render_map", AsyncMock(return_value=b"png")), \
+             patch.object(bot, "_send_rich", AsyncMock(return_value=False)) as rich, \
+             patch.object(bot, "_send_map", AsyncMock(return_value=False)) as photo:
+            u = fake_update(5, ChatType.PRIVATE)
+            await bot._deliver_psi(u, fake_context(), None)
+        for call in rich.await_args_list + photo.await_args_list:
+            self.assertIs(call.kwargs["reply_markup"], bot.MAIN_KEYBOARD)
+        # every tier failed -> plain HTML, still with the bar
+        self.assertIs(u.effective_chat.send_message.await_args.kwargs["reply_markup"], bot.MAIN_KEYBOARD)
+
+    def test_psi_button_text_routes_to_psi(self):
+        from telegram import Update as TgUpdate
+        captured = {}
+        with patch.object(Application, "run_webhook", lambda self, **kw: captured.update(app=self)):
+            bot.main()
+        app = captured["app"]
+
+        def handler_for(text, chat_type="private"):
+            upd = TgUpdate.de_json({"update_id": 1, "message": {
+                "message_id": 1, "date": 0, "text": text,
+                "chat": {"id": 5, "type": chat_type}, "from": {"id": 5, "is_bot": False, "first_name": "u"},
+            }}, app.bot)
+            return next((h.callback for h in app.handlers[0] if h.check_update(upd)), None)
+
+        self.assertIs(handler_for(bot.PSI_BUTTON), bot.cmd_psi)
+        self.assertIsNone(handler_for("Check PSI please"))           # other text is ignored
+        self.assertIsNone(handler_for(bot.PSI_BUTTON, "supergroup"))  # private chats only
+
+
 class StartupTest(unittest.TestCase):
     def test_main_enables_concurrent_updates(self):
         captured = {}

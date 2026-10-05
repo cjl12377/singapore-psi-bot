@@ -16,7 +16,6 @@ from telegram import (
     InlineKeyboardMarkup,
     KeyboardButton,
     ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
     Update,
 )
 from telegram.constants import ChatType, ParseMode
@@ -88,19 +87,40 @@ COMMANDS_TEXT = (
 )
 
 
+PSI_BUTTON = "🌫 Check PSI"
+LOCATION_BUTTON = "📍 Share my location"
+
+# Pinned under the message box in private chats. Telegram doesn't tell bots which
+# device a user is on, so every client gets both buttons; on desktop the location
+# button does nothing, and /location explains the 📎 → Location route instead.
+MAIN_KEYBOARD = ReplyKeyboardMarkup(
+    [[KeyboardButton(PSI_BUTTON), KeyboardButton(LOCATION_BUTTON, request_location=True)]],
+    resize_keyboard=True,
+    is_persistent=True,
+)
+
+
+def _keyboard(update: Update) -> ReplyKeyboardMarkup | None:
+    """The button bar for private chats. Groups get none: a group keyboard shows to every
+    member, and Telegram only allows location-request buttons in private chats."""
+    return MAIN_KEYBOARD if update.effective_chat.type == ChatType.PRIVATE else None
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "Singapore PSI Bot\n\n"
         "Get live air quality readings from the National Environment Agency.\n\n"
         f"{COMMANDS_TEXT}\n\n"
-        "Data from data.gov.sg, updated hourly."
+        "Data from data.gov.sg, updated hourly.",
+        reply_markup=_keyboard(update),
     )
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         f"{COMMANDS_TEXT}\n\n"
-        "Readings are fetched from data.gov.sg and cached for 10 minutes."
+        "Readings are fetched from data.gov.sg and cached for 10 minutes.",
+        reply_markup=_keyboard(update),
     )
 
 
@@ -109,16 +129,15 @@ async def cmd_psi(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    keyboard = ReplyKeyboardMarkup(
-        [[KeyboardButton("📍 Share my location", request_location=True)]],
-        one_time_keyboard=True,
-        resize_keyboard=True,
-    )
+    if update.effective_chat.type != ChatType.PRIVATE:
+        await update.message.reply_text(
+            "Location sharing only works in a private chat with me — message me directly.")
+        return
     await update.message.reply_text(
-        "Tap the button below to share your location — I'll use it once to find "
-        "your PSI region and won't store it.\n\n"
+        f"Tap {LOCATION_BUTTON} at the bottom of the chat — I'll use your location once to "
+        "find your PSI region and won't store it.\n\n"
         "On desktop? The button only works in the phone app — use 📎 → Location instead.",
-        reply_markup=keyboard,
+        reply_markup=MAIN_KEYBOARD,
     )
 
 
@@ -129,7 +148,7 @@ async def on_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if place is None:
         await update.message.reply_text(
             "That doesn't look like it's in Singapore — PSI readings only cover Singapore.",
-            reply_markup=ReplyKeyboardRemove(),
+            reply_markup=_keyboard(update),
         )
         return
     await _deliver_psi(update, context, place=place)
@@ -138,7 +157,13 @@ async def on_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 MAP_MEDIA_ID = "map"
 
 
-async def _send_rich(token: str, chat_id: int, markdown: str, png: bytes | None = None) -> bool:
+def _markup_param(markup: ReplyKeyboardMarkup | None) -> dict:
+    """reply_markup as a raw Bot API parameter (JSON-encoded), or nothing."""
+    return {"reply_markup": json.dumps(markup.to_dict(), ensure_ascii=False)} if markup else {}
+
+
+async def _send_rich(token: str, chat_id: int, markdown: str, png: bytes | None = None,
+                     reply_markup: ReplyKeyboardMarkup | None = None) -> bool:
     """Send via Bot API sendRichMessage (PTB 21.6 has no wrapper). False -> caller falls back.
 
     With png, the image is uploaded in the same request and the markdown must reference it
@@ -150,7 +175,8 @@ async def _send_rich(token: str, chat_id: int, markdown: str, png: bytes | None 
     try:
         async with httpx.AsyncClient(timeout=20) as client:
             payload = {"chat_id": chat_id,
-                       "rich_message": json.dumps(rich, ensure_ascii=False)}
+                       "rich_message": json.dumps(rich, ensure_ascii=False),
+                       **_markup_param(reply_markup)}
             if png:
                 resp = await client.post(
                     f"https://api.telegram.org/bot{token}/sendRichMessage",
@@ -189,13 +215,15 @@ async def _render_map(data: dict, area: str | None) -> bytes | None:
     return png
 
 
-async def _send_map(token: str, chat_id: int, png: bytes, caption: str) -> bool:
+async def _send_map(token: str, chat_id: int, png: bytes, caption: str,
+                    reply_markup: ReplyKeyboardMarkup | None = None) -> bool:
     """Send the regional map as a plain photo (sendPhoto). False -> caller falls back to the rich table."""
     try:
         async with httpx.AsyncClient(timeout=20) as client:
             resp = await client.post(
                 f"https://api.telegram.org/bot{token}/sendPhoto",
-                data={"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"},
+                data={"chat_id": chat_id, "caption": caption, "parse_mode": "HTML",
+                      **_markup_param(reply_markup)},
                 files={"photo": ("psi.png", png, "image/png")},
             )
         if resp.status_code == 200 and resp.json().get("ok"):
@@ -224,7 +252,7 @@ async def _deliver_psi(
             wait_int = math.ceil(wait)
             sent = await update.effective_chat.send_message(
                 f"⏳ Please wait {wait_int}s before requesting again.",
-                reply_markup=ReplyKeyboardRemove(),
+                reply_markup=_keyboard(update),
             )
             context.application.create_task(
                 _delete_later(context.bot, sent.chat_id, sent.message_id, wait_int)
@@ -240,26 +268,25 @@ async def _deliver_psi(
     if data is None:
         await update.effective_chat.send_message(
             f"Could not fetch PSI data: {stale_reason}. Please try again later.",
-            reply_markup=ReplyKeyboardRemove(),
+            reply_markup=_keyboard(update),
         )
         return
 
     area, region = place if place else (None, None)
-    token, chat_id = context.bot.token, update.effective_chat.id
+    token, chat_id, keyboard = context.bot.token, update.effective_chat.id, _keyboard(update)
     wants_map = await prefs.get_view(user_id) == prefs.VIEW_MAP
     png = await _render_map(data, area) if wants_map else None
     if png:
         # 1) map embedded in a rich message; 2) map as a plain photo + caption
         if await _send_rich(token, chat_id,
-                            format_psi_rich(data, stale_reason, area, region, map_id=MAP_MEDIA_ID), png):
+                            format_psi_rich(data, stale_reason, area, region, map_id=MAP_MEDIA_ID), png,
+                            reply_markup=keyboard):
             return
-        if await _send_map(token, chat_id, png, format_psi_caption(data, stale_reason, area, region)):
-            if place:  # photos can't carry the keyboard removal
-                await update.effective_chat.send_message("👆 Your area is outlined on the map.",
-                                                reply_markup=ReplyKeyboardRemove())
+        if await _send_map(token, chat_id, png, format_psi_caption(data, stale_reason, area, region),
+                           reply_markup=keyboard):
             return
-    if await _send_rich(context.bot.token, update.effective_chat.id,
-                        format_psi_rich(data, stale_reason, area, region)):
+    if await _send_rich(token, chat_id, format_psi_rich(data, stale_reason, area, region),
+                        reply_markup=keyboard):
         return
 
     text = (
@@ -267,9 +294,7 @@ async def _deliver_psi(
         if place is None
         else format_region_psi_message(data, *place, stale_reason)
     )
-    await update.effective_chat.send_message(
-        text, parse_mode=ParseMode.HTML, reply_markup=ReplyKeyboardRemove()
-    )
+    await update.effective_chat.send_message(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
 
 ALERT_EXPLAINER = (
@@ -409,6 +434,9 @@ def main() -> None:
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("psi", cmd_psi))
+    # The keyboard's PSI button sends its label as plain text.
+    app.add_handler(MessageHandler(
+        filters.Text([PSI_BUTTON]) & filters.ChatType.PRIVATE & filters.UpdateType.MESSAGE, cmd_psi))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("location", cmd_location))
     # UpdateType.MESSAGE excludes live-location edits, which arrive as
