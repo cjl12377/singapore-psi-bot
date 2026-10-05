@@ -319,7 +319,7 @@ def format_psi_rich(
             f"{line2}\n"
             f"*🕐 Updated {updated}*\n\n"
         )
-        advisory = f"### PSI Health Warnings as per NEA\n\n{advice_markdown(category)}\n\n"
+        advisory = f"#### PSI Health Warnings as per NEA\n\n{advice_markdown(category)}\n\n"
         if map_id:
             return f"{head}![PSI by region](tg://photo?id={map_id})\n\n{advisory.rstrip()}"
 

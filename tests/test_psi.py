@@ -64,6 +64,8 @@ class FormattingTest(unittest.TestCase):
         with_map = psi.format_psi_rich(SAMPLE_DATA, map_id="map")
         self.assertIn("![PSI by region](tg://photo?id=map)", with_map)
         self.assertNotIn("Regional breakdown", with_map)
+        for md in (table, with_map):  # one level below the section headings
+            self.assertIn("\n#### PSI Health Warnings as per NEA\n", md)
 
     def test_malformed_data_returns_error_text(self):
         bad = {"data": {"items": [{"readings": {}}]}}
