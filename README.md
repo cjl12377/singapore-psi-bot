@@ -22,7 +22,7 @@ Try it: [@Haze_SGbot](https://t.me/Haze_SGbot)
 | `location.py` + `planning_areas.json` | Point-in-polygon lookup from coordinates to planning area to PSI region |
 | `alerts.py` | Alert subscriptions, the 30-minute category-change check, NEA advisory text |
 | `analytics.py` | Redis-backed usage tracking for `/stats` |
-| `feedback.py` | Feedback storage and formatting for `/feedback` and `/feedbacks` |
+| `feedback.py` | Feedback storage and formatting for `/feedback` and `/feedback_list` |
 
 Design notes:
 
@@ -47,7 +47,7 @@ This is an approximation. To correct an assignment, edit `AREA_REGION` in `locat
 Two hidden commands are for a single admin:
 
 - `/stats` shows usage analytics (active users in the last 24h, all-time users, retention, and new users per day).
-- `/feedbacks [n]` lists the newest n feedback entries (default 10, max 50), each with the sender's @username, Telegram ID and the time in SGT. The admin also gets a DM for each new entry as it arrives.
+- `/feedback_list [n]` lists the newest n feedback entries (default 10, max 50), each with the sender's @username, Telegram ID and the time in SGT. The admin also gets a DM for each new entry as it arrives.
 
 Both commands:
 
@@ -95,7 +95,7 @@ See `.env.example`. The bot is webhook-only, so running it locally needs a publi
 python bot.py
 ```
 
-On startup the bot registers its webhook and its command menu with Telegram.
+On startup the bot registers its webhook and its command menu with Telegram. It also sets the profile's About text and the intro shown in an empty chat from `SHORT_DESCRIPTION` and `DESCRIPTION` in `bot.py`. Edit them there, not in BotFather: BotFather edits are overwritten at the next deploy.
 
 ## Testing
 

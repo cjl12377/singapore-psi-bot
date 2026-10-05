@@ -187,8 +187,8 @@ class RateLimitTest(FeedbackTestCase):
 
 class AdminListTest(FeedbackTestCase):
     async def _list(self, uid=ADMIN, chat_type=ChatType.PRIVATE, args=None):
-        u = fake_update(uid, "/feedbacks", chat_type=chat_type)
-        await bot.cmd_feedbacks(u, fake_context(args))
+        u = fake_update(uid, "/feedback_list", chat_type=chat_type)
+        await bot.cmd_feedback_list(u, fake_context(args))
         return [call.args[0] for call in u.message.reply_text.await_args_list]
 
     async def test_only_admin_in_private_chat(self):
@@ -236,6 +236,35 @@ class AdminListTest(FeedbackTestCase):
             self.assertIn("@a&lt;b&gt;", text)
 
 
+class PostInitTest(unittest.IsolatedAsyncioTestCase):
+    def _app(self, short, desc):
+        return SimpleNamespace(bot=SimpleNamespace(
+            delete_my_commands=AsyncMock(), set_my_commands=AsyncMock(),
+            get_my_short_description=AsyncMock(return_value=SimpleNamespace(short_description=short)),
+            get_my_description=AsyncMock(return_value=SimpleNamespace(description=desc)),
+            set_my_short_description=AsyncMock(), set_my_description=AsyncMock(),
+        ))
+
+    async def test_menu_lists_feedback_but_not_admin_commands(self):
+        app = self._app(bot.SHORT_DESCRIPTION, bot.DESCRIPTION)
+        await bot._post_init(app)
+        names = [c.command for c in app.bot.set_my_commands.await_args.args[0]]
+        self.assertIn("feedback", names)
+        self.assertNotIn("feedback_list", names)
+        self.assertNotIn("stats", names)
+
+    async def test_profile_texts_written_only_when_changed(self):
+        app = self._app(bot.SHORT_DESCRIPTION, bot.DESCRIPTION)
+        await bot._post_init(app)
+        app.bot.set_my_short_description.assert_not_awaited()
+        app.bot.set_my_description.assert_not_awaited()
+
+        app = self._app("old about", "old intro")
+        await bot._post_init(app)
+        app.bot.set_my_short_description.assert_awaited_once_with(bot.SHORT_DESCRIPTION)
+        app.bot.set_my_description.assert_awaited_once_with(bot.DESCRIPTION)
+
+
 class RoutingTest(unittest.TestCase):
     """Handler order in the real app: the PSI button and commands beat feedback capture."""
 
@@ -272,11 +301,19 @@ class RoutingTest(unittest.TestCase):
         commands = {next(iter(h.commands)): h.callback
                     for h in self.app.handlers[0] if isinstance(h, CommandHandler)}
         self.assertIs(commands["feedback"], bot.cmd_feedback)
-        self.assertIs(commands["feedbacks"], bot.cmd_feedbacks)
+        self.assertIs(commands["feedback_list"], bot.cmd_feedback_list)
+
+    def test_profile_texts_fit_and_mention_feedback(self):
+        self.assertLessEqual(len(bot.SHORT_DESCRIPTION), 120)  # Telegram's limits
+        self.assertLessEqual(len(bot.DESCRIPTION), 512)
+        for text in (bot.SHORT_DESCRIPTION, bot.DESCRIPTION):
+            self.assertIn("/feedback", text)
+            self.assertNotIn("/feedback_list", text)
+            self.assertNotIn("**", text)  # shown literally, not as bold
 
     def test_menu_and_help(self):
         self.assertIn("/feedback —", bot.COMMANDS_TEXT)
-        self.assertNotIn("/feedbacks", bot.COMMANDS_TEXT)
+        self.assertNotIn("/feedback_list", bot.COMMANDS_TEXT)
 
 
 if __name__ == "__main__":

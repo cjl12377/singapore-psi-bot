@@ -401,7 +401,7 @@ async def _save_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
     try:
         await context.bot.send_message(ADMIN_USER_ID, f"💬 <b>New feedback</b>\n{feedback.format_entry(entry)}",
                                        parse_mode=ParseMode.HTML)
-    except Exception as exc:  # it's saved either way; /feedbacks still lists it
+    except Exception as exc:  # it's saved either way; /feedback_list still lists it
         logger.warning("feedback DM to admin failed: %s", type(exc).__name__)
     note = f" It was trimmed to {feedback.MAX_LEN:,} characters." if trimmed else ""
     await update.message.reply_text(f"🙏 Thanks — your feedback was sent.{note}",
@@ -428,7 +428,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _save_feedback(update, context, update.message.text)
 
 
-async def cmd_feedbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_feedback_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id != ADMIN_USER_ID or update.effective_chat.type != ChatType.PRIVATE:
         return  # silent — indistinguishable from an unrecognized command
     n = 10
@@ -495,8 +495,29 @@ async def on_view_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await _deliver_psi(update, context, None, preview=True)
 
 
+# The bot profile's "About" (max 120 chars) and the intro shown in an empty chat
+# (max 512 chars). Plain text: Telegram doesn't render formatting in either.
+SHORT_DESCRIPTION = (
+    "Live Singapore PSI, updated hourly\n"
+    "/psi latest reading\n"
+    "/feedback send feedback\n"
+    "\n"
+    "Hobby project, not affiliated with NEA"
+)
+DESCRIPTION = (
+    "Live Singapore air quality readings, direct from NEA (data.gov.sg)\n"
+    "Get the current PSI and at-a-glance health category (Good, Moderate, Unhealthy) "
+    "for every region\n"
+    "\n"
+    "/psi — get the latest reading\n"
+    "/feedback — send feedback to the developer\n"
+    "\n"
+    "Hobby project - not sponsored by NEA or anyone"
+)
+
+
 async def _post_init(app: Application) -> None:
-    # /stats and /feedbacks are deliberately absent so they never show in Telegram's command menu.
+    # /stats and /feedback_list are deliberately absent so they never show in Telegram's command menu.
     commands = [
         BotCommand("psi", "Current PSI across Singapore"),
         BotCommand("location", "PSI for where you are"),
@@ -512,6 +533,13 @@ async def _post_init(app: Application) -> None:
         await app.bot.delete_my_commands(scope=scope)
     await app.bot.set_my_commands(commands)
     await app.bot.set_my_commands(commands, scope=BotCommandScopeAllPrivateChats())
+
+    # Profile texts live here rather than in BotFather, so they ship with the code.
+    # Only written when they differ, to avoid needless API calls on every boot.
+    if (await app.bot.get_my_short_description()).short_description != SHORT_DESCRIPTION:
+        await app.bot.set_my_short_description(SHORT_DESCRIPTION)
+    if (await app.bot.get_my_description()).description != DESCRIPTION:
+        await app.bot.set_my_description(DESCRIPTION)
 
 
 def main() -> None:
@@ -538,7 +566,7 @@ def main() -> None:
     app.add_handler(CommandHandler("view", cmd_view))
     app.add_handler(CallbackQueryHandler(on_view_button, pattern=r"^view:"))
     app.add_handler(CommandHandler("feedback", cmd_feedback, filters=filters.UpdateType.MESSAGE))
-    app.add_handler(CommandHandler("feedbacks", cmd_feedbacks, filters=filters.UpdateType.MESSAGE))
+    app.add_handler(CommandHandler("feedback_list", cmd_feedback_list, filters=filters.UpdateType.MESSAGE))
     # Must stay after the PSI-button handler: the first matching handler wins, so
     # tapping 🌫 Check PSI is never captured as feedback.
     app.add_handler(MessageHandler(
