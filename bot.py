@@ -31,6 +31,7 @@ from telegram.ext import (
 
 import alerts
 import analytics
+import feedback
 import prefs
 from location import locate
 from psi import (
@@ -83,6 +84,7 @@ COMMANDS_TEXT = (
     "/location — PSI for where you are (or just send a location)\n"
     "/alert — get notified when air quality changes\n"
     "/view — choose map or text for /psi\n"
+    "/feedback — send feedback to the developer\n"
     "/help — show this message"
 )
 
@@ -365,6 +367,94 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+_awaiting_feedback: dict[str, float] = {}  # user -> deadline for their next message
+_feedback_times: dict[str, list[float]] = {}  # user -> recent feedback timestamps
+
+
+def _feedback_allowed(user_id: str, now: float) -> bool:
+    """Sliding-window limit: RATE_LIMIT entries per RATE_WINDOW_SECS. Records the attempt if allowed."""
+    for uid in list(_feedback_times):
+        _feedback_times[uid] = [t for t in _feedback_times[uid] if now - t < feedback.RATE_WINDOW_SECS]
+        if not _feedback_times[uid]:
+            del _feedback_times[uid]
+    times = _feedback_times.setdefault(user_id, [])
+    if len(times) >= feedback.RATE_LIMIT:
+        return False
+    times.append(now)
+    return True
+
+
+async def _save_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
+    user = update.effective_user
+    if not _feedback_allowed(str(user.id), time.monotonic()):
+        await update.message.reply_text("You've sent a lot of feedback — please wait a minute.",
+                                        reply_markup=_keyboard(update))
+        return
+    trimmed = len(text) > feedback.MAX_LEN
+    try:
+        entry = await feedback.save(user.id, user.username, text[:feedback.MAX_LEN])
+    except Exception as exc:
+        logger.warning("feedback save failed: %s", type(exc).__name__)
+        await update.message.reply_text("Couldn't send that just now — please try again in a bit.",
+                                        reply_markup=_keyboard(update))
+        return
+    try:
+        await context.bot.send_message(ADMIN_USER_ID, f"💬 <b>New feedback</b>\n{feedback.format_entry(entry)}",
+                                       parse_mode=ParseMode.HTML)
+    except Exception as exc:  # it's saved either way; /feedbacks still lists it
+        logger.warning("feedback DM to admin failed: %s", type(exc).__name__)
+    note = f" It was trimmed to {feedback.MAX_LEN:,} characters." if trimmed else ""
+    await update.message.reply_text(f"🙏 Thanks — your feedback was sent.{note}",
+                                    reply_markup=_keyboard(update))
+
+
+async def cmd_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat.type != ChatType.PRIVATE:
+        await update.message.reply_text("Send me /feedback in a private chat.")
+        return
+    parts = update.message.text.split(maxsplit=1)  # keeps the feedback's own line breaks
+    if len(parts) > 1:
+        await _save_feedback(update, context, parts[1])
+        return
+    _awaiting_feedback[str(update.effective_user.id)] = time.monotonic() + feedback.AWAIT_SECS
+    await update.message.reply_text("What would you like to tell me? Send it as your next message.",
+                                    reply_markup=_keyboard(update))
+
+
+async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Plain text in a private chat: feedback if /feedback asked for it, otherwise ignored."""
+    deadline = _awaiting_feedback.pop(str(update.effective_user.id), None)
+    if deadline is not None and time.monotonic() < deadline:
+        await _save_feedback(update, context, update.message.text)
+
+
+async def cmd_feedbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_user.id != ADMIN_USER_ID or update.effective_chat.type != ChatType.PRIVATE:
+        return  # silent — indistinguishable from an unrecognized command
+    n = 10
+    if context.args and context.args[0].isdigit():
+        n = max(1, min(int(context.args[0]), 50))
+    entries = await feedback.recent(n)
+    if not entries:
+        await update.message.reply_text("No feedback yet.")
+        return
+    total = await feedback.count()
+    blocks = [f"<b>Feedback</b> — newest {len(entries)} of {total}"]
+    blocks += [feedback.format_entry(e) for e in entries]
+    # Telegram caps a message at 4,096 characters; pack whole entries into each message.
+    messages, current = [], ""
+    for block in blocks:
+        candidate = f"{current}\n\n———\n\n{block}" if current else block
+        if len(candidate) > 4000 and current:
+            messages.append(current)
+            current = block
+        else:
+            current = candidate
+    messages.append(current)
+    for text in messages:
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
 def _view_status(view: str) -> tuple[str, InlineKeyboardMarkup]:
     mark = lambda v: "✅ " if view == v else ""
     text = (
@@ -406,12 +496,13 @@ async def on_view_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def _post_init(app: Application) -> None:
-    # /stats is deliberately absent so it never shows in Telegram's command menu.
+    # /stats and /feedbacks are deliberately absent so they never show in Telegram's command menu.
     commands = [
         BotCommand("psi", "Current PSI across Singapore"),
         BotCommand("location", "PSI for where you are"),
         BotCommand("alert", "Get notified when air quality changes"),
         BotCommand("view", "Choose map or text for /psi"),
+        BotCommand("feedback", "Send feedback to the developer"),
         BotCommand("help", "Show available commands"),
         BotCommand("start", "About this bot"),
     ]
@@ -446,6 +537,12 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(on_alert_button, pattern=r"^alt:"))
     app.add_handler(CommandHandler("view", cmd_view))
     app.add_handler(CallbackQueryHandler(on_view_button, pattern=r"^view:"))
+    app.add_handler(CommandHandler("feedback", cmd_feedback, filters=filters.UpdateType.MESSAGE))
+    app.add_handler(CommandHandler("feedbacks", cmd_feedbacks, filters=filters.UpdateType.MESSAGE))
+    # Must stay after the PSI-button handler: the first matching handler wins, so
+    # tapping 🌫 Check PSI is never captured as feedback.
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE & filters.UpdateType.MESSAGE, on_text))
     app.job_queue.run_repeating(alerts.run_alert_check, interval=1800, first=60)
 
     logger.info("Starting webhook on port %d → %s/webhook", PORT, WEBHOOK_URL)

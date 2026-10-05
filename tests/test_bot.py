@@ -276,7 +276,7 @@ class KeyboardTest(unittest.IsolatedAsyncioTestCase):
             return next((h.callback for h in app.handlers[0] if h.check_update(upd)), None)
 
         self.assertIs(handler_for(bot.PSI_BUTTON), bot.cmd_psi)
-        self.assertIsNone(handler_for("Check PSI please"))           # other text is ignored
+        self.assertIs(handler_for("Check PSI please"), bot.on_text)  # other text: feedback capture only
         self.assertIsNone(handler_for(bot.PSI_BUTTON, "supergroup"))  # private chats only
 
 

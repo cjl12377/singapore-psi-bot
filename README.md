@@ -11,6 +11,7 @@ Try it: [@Haze_SGbot](https://t.me/Haze_SGbot)
 - **`/location`**, or just send a location — finds your URA planning area and shows the PSI for its region.
 - **Button bar** — in private chats, **🌫 Check PSI** and **📍 Share location (mobile)** stay pinned under the message box. Telegram doesn't tell bots which device you're on, so desktop shows the location button too; its label says it only works in the phone apps (on desktop, use 📎 → Location).
 - **`/alert`** — an on/off toggle. While on, the bot messages you whenever the PSI category changes (e.g. Moderate → Unhealthy), with NEA's health advice for the new level.
+- **`/feedback`** — send feedback to the developer, inline (`/feedback the map is great`) or as your next message after a bare `/feedback`. Private chats only; up to 1,000 characters and 5 entries per minute per user.
 
 ## How it works
 
@@ -21,6 +22,7 @@ Try it: [@Haze_SGbot](https://t.me/Haze_SGbot)
 | `location.py` + `planning_areas.json` | Point-in-polygon lookup from coordinates to planning area to PSI region |
 | `alerts.py` | Alert subscriptions, the 30-minute category-change check, NEA advisory text |
 | `analytics.py` | Redis-backed usage tracking for `/stats` |
+| `feedback.py` | Feedback storage and formatting for `/feedback` and `/feedbacks` |
 
 Design notes:
 
@@ -42,11 +44,16 @@ This is an approximation. To correct an assignment, edit `AREA_REGION` in `locat
 
 ### Admin access
 
-`/stats` shows usage analytics (active users in the last 24h, all-time users, retention, and new users per day) to a single admin:
+Two hidden commands are for a single admin:
 
-- It only responds to the Telegram user whose numeric ID matches the `ADMIN_USER_ID` environment variable, and only in a private chat with the bot.
+- `/stats` shows usage analytics (active users in the last 24h, all-time users, retention, and new users per day).
+- `/feedbacks [n]` lists the newest n feedback entries (default 10, max 50), each with the sender's @username, Telegram ID and the time in SGT. The admin also gets a DM for each new entry as it arrives.
+
+Both commands:
+
+- They only respond to the Telegram user whose numeric ID matches the `ADMIN_USER_ID` environment variable, and only in a private chat with the bot.
 - Everyone else, and the admin in a group chat, gets no reply, the same as for a command the bot doesn't recognise.
-- It isn't listed in the command menu registered at startup or in `/help`.
+- They aren't listed in the command menu registered at startup or in `/help`.
 
 ## Data sources
 
@@ -64,6 +71,7 @@ This is an approximation. To correct an assignment, edit `AREA_REGION` in `locat
 | `psi:requests:<user_id>` | Sorted set | Last 100 request timestamps per user (retention) |
 | `psi:alert:<user_id>` | Hash | Alert subscription: `chat_id`, `last_category`, `last_alert_at` |
 | `psi:alert_users` | Set | Users with alerts on |
+| `psi:feedback` | List | Feedback entries, newest first, capped at 1,000: JSON with `user_id`, `username`, `text`, `ts` |
 
 ## Setup
 
