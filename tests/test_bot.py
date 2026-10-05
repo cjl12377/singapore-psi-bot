@@ -205,7 +205,7 @@ class LocationTest(unittest.IsolatedAsyncioTestCase):
 
 
 class KeyboardTest(unittest.IsolatedAsyncioTestCase):
-    """The pinned 🌫 Check PSI / 📍 Share my location bar."""
+    """The pinned 🌫 Check PSI / 📍 Share location (mobile) bar."""
 
     def test_layout(self):
         (psi_btn, loc_btn), = bot.MAIN_KEYBOARD.keyboard

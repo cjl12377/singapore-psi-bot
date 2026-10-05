@@ -88,7 +88,7 @@ COMMANDS_TEXT = (
 
 
 PSI_BUTTON = "🌫 Check PSI"
-LOCATION_BUTTON = "📍 Share my location"
+LOCATION_BUTTON = "📍 Share location (mobile)"  # the button does nothing on desktop apps
 
 # Pinned under the message box in private chats. Telegram doesn't tell bots which
 # device a user is on, so every client gets both buttons; on desktop the location
