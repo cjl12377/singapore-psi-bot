@@ -3,7 +3,9 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from telegram import Update as TgUpdate
 from telegram.constants import ChatType
+from telegram.error import BadRequest
 from telegram.ext import Application
 
 from tests import SAMPLE_DATA
@@ -182,11 +184,101 @@ class ViewButtonTest(unittest.IsolatedAsyncioTestCase):
         set_view.assert_awaited_once_with("7", "text")
         self.assertTrue(deliver.await_args.kwargs["preview"])
 
+    async def test_expired_tap_still_saves_and_updates(self):
+        # A tap that woke the service from sleep: Telegram refuses the late answer.
+        u = fake_update(7, callback_data="view:text")
+        u.callback_query.answer.side_effect = BadRequest("Query is too old and response timeout expired")
+        with patch.object(bot.prefs, "set_view", AsyncMock()) as set_view, \
+             patch.object(bot, "_deliver_psi", AsyncMock()) as deliver:
+            await bot.on_view_button(u, fake_context())
+        set_view.assert_awaited_once_with("7", "text")
+        u.callback_query.edit_message_text.assert_awaited_once()
+        deliver.assert_awaited_once()
+
     async def test_save_failure_tells_user(self):
         u = fake_update(7, callback_data="view:map")
         with patch.object(bot.prefs, "set_view", AsyncMock(side_effect=ConnectionError)):
             await bot.on_view_button(u, fake_context())
         self.assertTrue(u.callback_query.answer.await_args.kwargs["show_alert"])
+
+
+class AlertButtonTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        stub = dict(subscribe=AsyncMock(), unsubscribe=AsyncMock(),
+                    current_reading=AsyncMock(return_value=("Good", 30, "east")),
+                    is_subscribed=AsyncMock(return_value=False))
+        p = patch.multiple(bot.alerts, **stub)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def press(self, uid, data):
+        u = fake_update(uid, ChatType.GROUP, callback_data=data)
+        u.callback_query.message = SimpleNamespace(chat_id=-100)
+        return u
+
+    async def test_buttons_carry_the_owner(self):
+        u = fake_update(7, ChatType.GROUP)
+        await bot.cmd_alert(u, fake_context())
+        (button,), = u.message.reply_text.await_args.kwargs["reply_markup"].inline_keyboard
+        self.assertEqual(button.callback_data, "alt:on:7")
+
+    async def test_owner_can_toggle(self):
+        u = self.press(7, "alt:on:7")
+        await bot.on_alert_button(u, fake_context())
+        bot.alerts.subscribe.assert_awaited_once_with("7", -100, "Good")
+        (button,), = u.callback_query.edit_message_text.await_args.kwargs["reply_markup"].inline_keyboard
+        self.assertEqual(button.callback_data, "alt:off:7")
+
+    async def test_someone_else_is_turned_away(self):
+        u = self.press(8, "alt:on:7")
+        await bot.on_alert_button(u, fake_context())
+        bot.alerts.subscribe.assert_not_awaited()
+        u.callback_query.edit_message_text.assert_not_awaited()
+        self.assertTrue(u.callback_query.answer.await_args.kwargs["show_alert"])
+
+    async def test_old_buttons_without_owner_still_work(self):
+        await bot.on_alert_button(self.press(8, "alt:off"), fake_context())
+        bot.alerts.unsubscribe.assert_awaited_once_with("8")
+
+
+class ErrorHandlerTest(unittest.IsolatedAsyncioTestCase):
+    def ctx(self):
+        return SimpleNamespace(error=ConnectionError("redis down"))
+
+    def real_update(self, u):
+        """on_error only replies to real Updates; wrap the fake's parts in one."""
+        upd = unittest.mock.MagicMock(spec=TgUpdate)
+        upd.effective_chat, upd.message = u.effective_chat, u.message
+        upd.callback_query = None
+        return upd
+
+    async def test_message_gets_a_reply(self):
+        upd = self.real_update(fake_update(7))
+        with self.assertLogs(bot.logger, "ERROR"):
+            await bot.on_error(upd, self.ctx())
+        upd.message.reply_text.assert_awaited_once_with(bot.ERROR_REPLY)
+
+    async def test_button_gets_an_alert_or_falls_back_to_a_message(self):
+        u = fake_update(7, callback_data="alt:on")
+        upd = self.real_update(u)
+        upd.callback_query = u.callback_query
+        with self.assertLogs(bot.logger, "ERROR"):
+            await bot.on_error(upd, self.ctx())
+        u.callback_query.answer.assert_awaited_once_with(bot.ERROR_REPLY, show_alert=True)
+        u.effective_chat.send_message.assert_not_awaited()
+
+        u.callback_query.answer.side_effect = BadRequest("Query is too old")
+        with self.assertLogs(bot.logger, "ERROR"):
+            await bot.on_error(upd, self.ctx())
+        u.effective_chat.send_message.assert_awaited_once_with(bot.ERROR_REPLY)
+
+    async def test_jobs_and_failed_replies_dont_raise(self):
+        with self.assertLogs(bot.logger, "ERROR"):
+            await bot.on_error(None, self.ctx())  # error from the alert job
+        upd = self.real_update(fake_update(7))
+        upd.message.reply_text.side_effect = BadRequest("Message thread not found")
+        with self.assertLogs(bot.logger, "WARNING"):
+            await bot.on_error(upd, self.ctx())
 
 
 class LocationTest(unittest.IsolatedAsyncioTestCase):
@@ -287,6 +379,14 @@ class StartupTest(unittest.TestCase):
             bot.main()
         self.assertGreater(captured["app"].update_processor.max_concurrent_updates, 1)
         self.assertEqual(captured["secret_token"], bot.WEBHOOK_SECRET)  # webhook is authenticated
+        self.assertIn(bot.on_error, captured["app"].error_handlers)
+
+    def test_webhook_secret_is_stable_and_valid(self):
+        import hashlib
+        expected = hashlib.sha256(f"webhook-secret:{bot.BOT_TOKEN}".encode()).hexdigest()
+        self.assertEqual(bot.WEBHOOK_SECRET, expected)  # same on every boot
+        self.assertNotIn(bot.BOT_TOKEN, bot.WEBHOOK_SECRET)
+        self.assertRegex(bot.WEBHOOK_SECRET, r"^[A-Za-z0-9_-]{1,256}$")  # Telegram's allowed set
 
 
 class AnalyticsTest(unittest.IsolatedAsyncioTestCase):

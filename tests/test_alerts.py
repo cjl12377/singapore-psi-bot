@@ -2,7 +2,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from telegram.error import Forbidden, RetryAfter
+from telegram.error import Forbidden, RetryAfter, TimedOut
 
 import tests  # noqa: F401  (sets the environment)
 import alerts
@@ -63,9 +63,11 @@ class RunAlertCheckTest(unittest.IsolatedAsyncioTestCase):
 
     async def _run(self, subs, send, reading=("Unhealthy", 120, "east")):
         fake = FakeRedis(subs)
+        self.sleep = AsyncMock()
         with patch.object(alerts, "redis_client", fake), \
              patch.object(alerts, "current_reading", AsyncMock(return_value=reading)), \
-             patch.object(alerts, "unsubscribe", AsyncMock()) as unsub:
+             patch.object(alerts, "unsubscribe", AsyncMock()) as unsub, \
+             patch.object(alerts.asyncio, "sleep", self.sleep):
             await alerts.run_alert_check(self._context(send))
         return fake, unsub
 
@@ -78,9 +80,29 @@ class RunAlertCheckTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake.subs["1"]["last_category"], "Unhealthy")
 
     async def test_failed_send_is_retried_next_check(self):
-        send = AsyncMock(side_effect=RetryAfter(5))
+        send = AsyncMock(side_effect=TimedOut())
         fake, _ = await self._run({"1": {"chat_id": "1", "last_category": "Moderate"}}, send)
         self.assertEqual(fake.subs["1"]["last_category"], "Moderate")  # not marked delivered
+
+    async def test_rate_limited_send_waits_and_retries_once(self):
+        send = AsyncMock(side_effect=[RetryAfter(5), None])
+        fake, _ = await self._run({"1": {"chat_id": "1", "last_category": "Moderate"}}, send)
+        self.assertEqual(send.await_count, 2)
+        self.sleep.assert_any_await(5)
+        self.assertEqual(fake.subs["1"]["last_category"], "Unhealthy")
+
+    async def test_still_rate_limited_is_left_for_next_check(self):
+        send = AsyncMock(side_effect=RetryAfter(5))
+        fake, _ = await self._run({"1": {"chat_id": "1", "last_category": "Moderate"}}, send)
+        self.assertEqual(send.await_count, 2)  # one retry, not a loop
+        self.assertEqual(fake.subs["1"]["last_category"], "Moderate")
+
+    async def test_sends_are_paced(self):
+        subs = {str(i): {"chat_id": str(i), "last_category": "Moderate"} for i in range(3)}
+        await self._run(subs, AsyncMock())
+        paces = [c for c in self.sleep.await_args_list if c.args == (alerts.SEND_INTERVAL_SECS,)]
+        self.assertEqual(len(paces), 3)
+        self.assertLessEqual(1 / alerts.SEND_INTERVAL_SECS, 25)  # under Telegram's ~30/s
 
     async def test_blocked_user_is_unsubscribed(self):
         send = AsyncMock(side_effect=Forbidden("blocked"))
