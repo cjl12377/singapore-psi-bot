@@ -88,6 +88,14 @@ python bot.py
 
 On startup the bot registers its webhook and its command menu with Telegram.
 
+## Testing
+
+```bash
+python -m unittest discover -s tests -t .
+```
+
+The suite needs no network, Redis or bot token: Telegram, Redis and data.gov.sg are all mocked.
+
 ## Deploying on Render
 
 1. Create a **Web Service** from this repo.
