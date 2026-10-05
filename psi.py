@@ -1,3 +1,4 @@
+import asyncio
 import html
 import time
 from datetime import datetime
@@ -9,7 +10,14 @@ PSI_API_URL = "https://api-open.data.gov.sg/v2/real-time/api/psi"
 PM25_API_URL = "https://api-open.data.gov.sg/v2/real-time/api/pm25"
 CACHE_TTL = 600  # 10 minutes — API updates hourly, so this is conservative
 
-_cache: dict = {"data": None, "timestamp": 0.0, "stale_reason": None}
+# After a failed fetch, serve the cache (or the error) without retrying for this long,
+# so an outage doesn't make every request wait out the timeout.
+RETRY_AFTER_FAILURE = 60
+
+_cache: dict = {"data": None, "timestamp": 0.0, "stale_reason": None, "failed_at": 0.0}
+# One fetch at a time: when the cache expires under load, the first request refreshes
+# it and the rest reuse the result (data.gov.sg allows 6 calls / 10 s without a key).
+_fetch_lock = asyncio.Lock()
 
 PSI_BANDS = [
     (0, 50, "Good", "🟢"),
@@ -59,25 +67,27 @@ async def _attach_pm25(client: httpx.AsyncClient, data: dict) -> None:
 
 
 async def get_psi_data() -> tuple[Optional[dict], Optional[str]]:
-    """Returns (data, stale_reason). stale_reason is None when data is fresh."""
-    now = time.time()
-    if _cache["data"] and now - _cache["timestamp"] < CACHE_TTL:
-        return _cache["data"], None
+    """Returns (data, stale_reason). stale_reason is None when data is fresh; when
+    data is None, stale_reason says why the fetch failed."""
+    async with _fetch_lock:
+        now = time.time()
+        if _cache["data"] and now - _cache["timestamp"] < CACHE_TTL:
+            return _cache["data"], None
+        if now - _cache["failed_at"] < RETRY_AFTER_FAILURE:
+            return _cache["data"], _cache["stale_reason"]
 
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(PSI_API_URL)
-            resp.raise_for_status()
-            data = resp.json()
-            await _attach_pm25(client, data)
-            _cache["data"] = data
-            _cache["timestamp"] = now
-            _cache["stale_reason"] = None
-            return data, None
-    except Exception as exc:
-        reason = _classify_error(exc)
-        _cache["stale_reason"] = reason
-        return _cache["data"], reason if _cache["data"] else None
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(PSI_API_URL)
+                resp.raise_for_status()
+                data = resp.json()
+                await _attach_pm25(client, data)
+                _cache.update(data=data, timestamp=now, stale_reason=None, failed_at=0.0)
+                return data, None
+        except Exception as exc:
+            reason = _classify_error(exc)
+            _cache.update(stale_reason=reason, failed_at=now)
+            return _cache["data"], reason
 
 
 REGIONS = ["central", "north", "south", "east", "west"]

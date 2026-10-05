@@ -25,8 +25,9 @@ Design notes:
 
 - **Webhook only.** Updates arrive at `/webhook`, authenticated with a `secret_token` generated at each boot. Requests without it get a 403.
 - **Token-safe logging.** `httpx` logging is raised to WARNING, since Telegram API URLs contain the bot token.
-- **Rate limiting.** A 30-second per-user cooldown on PSI requests, shown as a countdown message that deletes itself.
-- **Stale data.** If data.gov.sg is unreachable, `/psi` serves the last cached reading with a banner explaining why.
+- **Rate limiting.** A 30-second per-user cooldown on PSI requests, including the preview after a `/view` change. The first blocked request gets one "please wait" notice that deletes itself; further attempts in the same window are ignored.
+- **Concurrency.** Updates are handled in parallel. Rendered maps are cached per reading (at most 56: one per planning area plus the plain map), and only one data.gov.sg fetch runs at a time, so a burst of requests at cache expiry makes one call, not many.
+- **Stale data.** If data.gov.sg is unreachable, `/psi` serves the last cached reading with a banner explaining why. After a failed fetch the bot waits 60 seconds before retrying, so an outage doesn't make every request wait out the timeout.
 - **Alert flapping guard.** A reading hovering on a band edge (100 ↔ 101) could otherwise alert every hour. Worsening alerts go out immediately; an improvement within 3 hours of the last alert waits until the reading settles.
 - **Location privacy.** Coordinates are used once to find the planning area and are never logged or stored.
 

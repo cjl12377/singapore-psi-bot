@@ -61,36 +61,22 @@ ADMIN_USER_ID = int(os.environ["ADMIN_USER_ID"])
 
 USER_COOLDOWN_SECS = 30
 _user_last_request: dict[str, float] = {}
+_user_warned: set[str] = set()  # users already told about their current cooldown
 
 
 def _prune_stale_requests(now: float) -> None:
     cutoff = now - USER_COOLDOWN_SECS
     for uid in [u for u, ts in _user_last_request.items() if ts < cutoff]:
         del _user_last_request[uid]
+        _user_warned.discard(uid)
 
 
-async def _countdown_and_delete(bot, chat_id: int, message_id: int, seconds: int) -> None:
-    """Ticks a cooldown message down to 0 once per second, then deletes it."""
-    remaining = seconds
-    while remaining > 0:
-        try:
-            await asyncio.sleep(1)
-        except asyncio.CancelledError:
-            return
-        remaining -= 1
-        if remaining > 0:
-            try:
-                await bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=message_id,
-                    text=f"⏳ Please wait {remaining}s before requesting again.",
-                )
-            except Exception:
-                pass  # rate-limited or message already gone — skip this tick
+async def _delete_later(bot, chat_id: int, message_id: int, seconds: int) -> None:
+    await asyncio.sleep(seconds)
     try:
         await bot.delete_message(chat_id=chat_id, message_id=message_id)
     except Exception:
-        pass
+        pass  # already deleted by the user
 
 
 COMMANDS_TEXT = (
@@ -181,14 +167,26 @@ async def _send_rich(token: str, chat_id: int, markdown: str, png: bytes | None 
     return False
 
 
+# Rendered maps for the current reading, keyed by highlighted area (None = no outline).
+# At most 56 entries (55 planning areas + none); cleared whenever new data is fetched.
+_map_cache: dict = {"data": None, "pngs": {}}
+
+
 async def _render_map(data: dict, area: str | None) -> bytes | None:
+    if _map_cache["data"] is not data:  # a new fetch: earlier maps show old readings
+        _map_cache.update(data=data, pngs={})
+    if area in _map_cache["pngs"]:
+        return _map_cache["pngs"][area]
     try:
         readings = data["data"]["items"][0]["readings"]
-        return await asyncio.to_thread(render_psi_map, readings["psi_twenty_four_hourly"], area,
-                                       readings.get("pm25_one_hourly"))
+        png = await asyncio.to_thread(render_psi_map, readings["psi_twenty_four_hourly"], area,
+                                      readings.get("pm25_one_hourly"))
     except Exception as exc:
         logger.warning("PSI map render failed: %s", type(exc).__name__)
         return None
+    if _map_cache["data"] is data:  # still current after the render
+        _map_cache["pngs"][area] = png
+    return png
 
 
 async def _send_map(token: str, chat_id: int, png: bytes, caption: str) -> bool:
@@ -214,22 +212,28 @@ async def _deliver_psi(
 ) -> None:
     user_id = str(update.effective_user.id)
     now = time.monotonic()
-    if not preview:  # a /view preview isn't a fresh request: no cooldown or analytics
-        _prune_stale_requests(now)
+    _prune_stale_requests(now)
 
-        wait = USER_COOLDOWN_SECS - (now - _user_last_request.get(user_id, 0))
-        if wait > 0:
+    wait = USER_COOLDOWN_SECS - (now - _user_last_request.get(user_id, 0))
+    if wait > 0:
+        # A /view preview inside the cooldown is skipped (the choice is still saved).
+        # Otherwise one notice per cooldown; repeated attempts are ignored so spam
+        # can't turn into a stream of outgoing messages.
+        if not preview and user_id not in _user_warned:
+            _user_warned.add(user_id)
             wait_int = math.ceil(wait)
             sent = await update.effective_chat.send_message(
                 f"⏳ Please wait {wait_int}s before requesting again.",
                 reply_markup=ReplyKeyboardRemove(),
             )
             context.application.create_task(
-                _countdown_and_delete(context.bot, sent.chat_id, sent.message_id, wait_int)
+                _delete_later(context.bot, sent.chat_id, sent.message_id, wait_int)
             )
-            return
+        return
 
-        _user_last_request[user_id] = now
+    _user_last_request[user_id] = now
+    _user_warned.discard(user_id)
+    if not preview:  # a /view preview isn't a fresh request: no analytics
         await analytics.track_request(user_id)
 
     data, stale_reason = await get_psi_data()
@@ -395,7 +399,13 @@ async def _post_init(app: Application) -> None:
 
 
 def main() -> None:
-    app = Application.builder().token(BOT_TOKEN).post_init(_post_init).build()
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .concurrent_updates(True)  # handle users in parallel, not one at a time
+        .post_init(_post_init)
+        .build()
+    )
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("psi", cmd_psi))
