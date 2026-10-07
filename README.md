@@ -48,7 +48,7 @@ This is an approximation. To correct an assignment, edit `AREA_REGION` in `locat
 
 Two hidden commands are for a single admin:
 
-- `/stats` shows usage analytics (active users in the last 24h, all-time users, retention, and new users per day).
+- `/stats` shows usage analytics. See [What `/stats` measures](#what-stats-measures).
 - `/feedback_list [n]` lists the newest n feedback entries (default 10, max 50), each with the sender's @username, Telegram ID and the time in SGT. The admin also gets a DM for each new entry as it arrives.
 
 Both commands:
@@ -63,6 +63,38 @@ Both commands:
 - URA Master Plan planning-area boundaries, via [yinshanyang/singapore](https://github.com/yinshanyang/singapore), simplified to ~22 m.
 - NEA's 24-hour PSI health advisory, used for the alert advice text.
 
+## What `/stats` measures
+
+A PSI request is `/psi`, the 🌫 Check PSI button, or a shared location. It counts once it gets past the 30-second cooldown. The preview after a `/view` change doesn't count. All analytics writes run in the background after the reply, and a failed write is logged and dropped, so a Redis outage never delays or breaks a reply.
+
+**Users**
+- **Active (24h)** is the number of people with a request in the rolling last 24 hours.
+- **Today** counts people active on the Singapore calendar day, split into first-time and returning users.
+- **Weekly and monthly active** count unique users over the last 7 and 30 calendar days. **Stickiness** is the average daily active count over the last 30 full days, divided by monthly active.
+- **Regulars** is the original all-time measure: 4+ visits, each more than 12 hours after the last.
+
+**Retention**
+- Retention shows what share of new users came back the next day, within 7 days, and within 30 days.
+- It covers the latest 14 daily cohorts whose window has fully passed.
+- Day-by-day activity is only recorded from the first deploy of this tracking onwards (`psi:active_since`). Earlier cohorts are left out rather than shown as 0%.
+
+**Usage**
+- Counts of PSI checks (by location, in groups), locations outside Singapore, cooldown hits, `/view` changes, feedback, blocks and unblocks, and group adds and removals.
+- **Unrecognised commands** are counted by name. Up to 100 names a day are kept; the total always counts. In groups, only `/cmd@ThisBot` counts.
+- **Other text** is private messages that weren't feedback. Only the count is kept, never the text.
+
+**Alerts**
+- Sent, failed and blocked alerts, and alerts held back by the flap guard. A held alert is counted on each 30-minute check it's held for.
+- **Follow-up rate** is the share of alerts followed by a PSI request from the same user within an hour. Telegram doesn't tell bots when a message is read.
+- **Warning lag** is the time from NEA publishing a reading to the first *worsening* alert it caused, over the last 200 such alerts.
+
+**Reliability**
+- **Reply time in the bot** runs from the handler starting to the reply being sent.
+- **Reply time end to end** runs from the user's message timestamp, which has one-second resolution. It includes cold starts and Telegram's delivery time.
+- Also counted: which format each reply went out as (rich map, photo, rich text, plain text), stale-data replies, fetch failures, and error replies.
+
+Not tracked yet: language, planning-area demand, peak load, and haze-day return rate.
+
 ## Redis keys
 
 | Key | Type | Purpose |
@@ -74,6 +106,15 @@ Both commands:
 | `psi:alert:<user_id>` | Hash | Alert subscription: `chat_id`, `last_category`, `last_alert_at` |
 | `psi:alert_users` | Set | Users with alerts on |
 | `psi:feedback` | List | Feedback entries, newest first, capped at 1,000: JSON with `user_id`, `username`, `text`, `ts` |
+| `psi:active:<YYYY-MM-DD>` | Set | Users with a PSI request that day (SGT). Expires after 100 days |
+| `psi:active_since` | String | The first day `psi:active:*` was recorded. Older cohorts are excluded from retention |
+| `psi:events:<YYYY-MM-DD>` | Hash | Event name → count for that day (e.g. `psi`, `cooldown`, `alert_sent`, `sent_photo`). Expires after 100 days |
+| `psi:reply_ms:<YYYY-MM-DD>` | List | Time in the handler per PSI reply, in ms, last 1,000 that day. Expires after 100 days |
+| `psi:e2e_ms:<YYYY-MM-DD>` | List | Time from the user's message to the reply, in ms, last 1,000 that day. Expires after 100 days |
+| `psi:unknown_cmds:<YYYY-MM-DD>` | Hash | Unrecognised command name → count, at most 100 names. Expires after 100 days |
+| `psi:alert_lag` | List | Seconds from NEA's reading to the first worsening alert, last 200 |
+| `psi:alerted:<user_id>` | String | Set when an alert is sent. Expires after 1 hour, and is used to measure follow-up |
+| `psi:groups` | Set | Group chat IDs the bot has been added to (since tracking began) |
 
 ## Setup
 

@@ -1,7 +1,7 @@
 import copy
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, PropertyMock, patch
 
 from telegram import Update as TgUpdate
 from telegram.constants import ChatType
@@ -29,8 +29,9 @@ def fake_context():
     tasks = []
 
     def create_task(coro):
-        tasks.append(coro)
-        coro.close()  # the delete-later sleep isn't needed in tests
+        if getattr(coro, "__name__", "") == "_delete_later":  # analytics writes aren't counted
+            tasks.append(coro)
+        coro.close()  # neither the delete-later sleep nor analytics runs in tests
 
     return SimpleNamespace(bot=SimpleNamespace(token="123:test-token", delete_message=AsyncMock()),
                            application=SimpleNamespace(create_task=create_task), tasks=tasks)
@@ -61,7 +62,10 @@ class DeliverPsiTest(unittest.IsolatedAsyncioTestCase):
         u, c = fake_update(7), fake_context()
         await bot._deliver_psi(u, c, None)
         self.assertEqual(len(self.sent), 1)
-        bot.analytics.track_request.assert_awaited_once_with("7")
+        bot.analytics.track_request.assert_called_once()
+        uid, events = bot.analytics.track_request.call_args.args
+        self.assertEqual((uid, events), ("7", ["psi", "sent_rich"]))
+        self.assertIsNotNone(bot.analytics.track_request.call_args.kwargs["reply_ms"])
 
     async def test_repeat_gets_one_notice_then_silence(self):
         u, c = fake_update(7), fake_context()
@@ -88,7 +92,7 @@ class DeliverPsiTest(unittest.IsolatedAsyncioTestCase):
             await bot._deliver_psi(u, c, None, preview=True)
         self.assertEqual(len(self.sent), 1)
         u.effective_chat.send_message.assert_not_awaited()  # previews are skipped silently
-        bot.analytics.track_request.assert_not_awaited()     # previews aren't usage
+        bot.analytics.track_request.assert_not_called()      # previews aren't usage
 
     async def test_users_have_separate_cooldowns(self):
         c = fake_context()
@@ -149,14 +153,10 @@ class MapCacheTest(unittest.IsolatedAsyncioTestCase):
 
 class StatsAccessTest(unittest.IsolatedAsyncioTestCase):
     async def test_only_admin_in_private_chat(self):
-        stub = dict(active_users_24h=AsyncMock(return_value=3),
-                    total_unique_users=AsyncMock(return_value=10),
-                    retained_users=AsyncMock(return_value=2),
-                    daily_growth=AsyncMock(return_value=[("2026-10-05", 1)]))
         cases = [(1, ChatType.PRIVATE, False), (42, ChatType.GROUP, False),
                  (42, ChatType.SUPERGROUP, False), (42, ChatType.CHANNEL, False),
                  (42, ChatType.PRIVATE, True)]
-        with patch.multiple(bot.analytics, **stub):
+        with patch.object(bot.analytics, "report", AsyncMock(return_value=sample_report())) as report:
             for uid, chat_type, allowed in cases:
                 u = fake_update(uid, chat_type)
                 await bot.cmd_stats(u, fake_context())
@@ -164,9 +164,114 @@ class StatsAccessTest(unittest.IsolatedAsyncioTestCase):
                 if allowed:
                     self.assertIn("All-time unique users: <b>10</b>",
                                   u.message.reply_text.await_args.args[0])
+        report.assert_awaited_once()  # nobody else even triggers the Redis reads
 
     def test_stats_not_in_help_text(self):
         self.assertNotIn("/stats", bot.COMMANDS_TEXT)
+
+    def test_format_stats(self):
+        text = "\n\n".join(bot.format_stats(sample_report()))
+        self.assertIn("Today: 4 active — 1 new, 3 returning", text)
+        self.assertIn("tracked since 2026-10-01", text)
+        self.assertIn("Next day: 25% (1/4)", text)
+        self.assertIn("Within 30 days: — (not enough data yet)", text)
+        self.assertIn("Alert subscribers: 3 (30% of users)", text)
+        self.assertIn("Followed by a PSI check within 1h: 50%", text)
+        self.assertIn("/&lt;b&gt; 2", text)  # user-typed command names are escaped
+        self.assertIn("p50 0.5s · p95 2.0s", text)
+        self.assertIn("median 10 min, worst 20 min", text)
+
+    def test_format_stats_with_no_data(self):
+        r = sample_report(since=None, avg_dau=None, reply_ms=[], e2e_ms=[], alert_lags=[],
+                          events={}, unknown=[], total_users=0, alert_subs=0)
+        text = "\n\n".join(bot.format_stats(r))
+        self.assertIn("no detailed data yet", text)
+        self.assertIn("p50 — · p95 —", text)
+
+    def test_long_stats_split_under_telegram_limit(self):
+        r = sample_report(unknown=[("x" * 32, 1)] * 5)
+        blocks = bot.format_stats(r) * 6
+        for msg in bot._pack_messages(blocks, "\n\n"):
+            self.assertLessEqual(len(msg), 4096)
+
+
+def sample_report(**overrides):
+    from datetime import date
+    r = {
+        "since": date(2026, 10, 1), "active_24h": 5, "total_users": 10, "regulars": 2,
+        "today_active": 4, "today_new": 1, "wau": 6, "mau": 8, "avg_dau": 2.0,
+        "alert_subs": 3, "groups": 1,
+        "returns": {1: (1, 4), 7: (0, 0), 30: (0, 0)},
+        "daily": [("2026-10-05", 1, 4)],
+        "events": {"psi": 9, "alert_sent": 2, "alert_followup": 1, "unknown_cmd": 2},
+        "unknown": [("<b>", 2)],
+        "reply_ms": [500, 400, 2000], "e2e_ms": [1000],
+        "alert_lags": [600, 1200],
+    }
+    r.update(overrides)
+    return r
+
+
+class UnknownCommandTest(unittest.IsolatedAsyncioTestCase):
+    async def _send(self, text, chat_type=ChatType.PRIVATE):
+        u = fake_update(7, chat_type)
+        u.message.text = text
+        c = fake_context()
+        c.bot.username = "Haze_SGbot"
+        with patch.object(bot.analytics, "record_unknown_command", Mock()) as record:
+            await bot.on_unknown_command(u, c)
+        u.message.reply_text.assert_not_awaited()  # still silent
+        return record
+
+    async def test_private_commands_are_counted(self):
+        (await self._send("/weather")).assert_called_once_with("weather")
+
+    async def test_groups_count_only_commands_for_this_bot(self):
+        (await self._send("/weather", ChatType.GROUP)).assert_not_called()
+        (await self._send("/weather@OtherBot", ChatType.GROUP)).assert_not_called()
+        (await self._send("/weather@Haze_SGbot", ChatType.GROUP)).assert_called_once_with("weather")
+
+    def test_known_commands_never_reach_it(self):
+        captured = {}
+        with patch.object(Application, "run_webhook", lambda self, **kw: captured.update(app=self)):
+            bot.main()
+        app = captured["app"]
+
+        def first_handler(text):
+            upd = TgUpdate.de_json({"update_id": 1, "message": {
+                "message_id": 1, "date": 0, "text": text,
+                "entities": [{"type": "bot_command", "offset": 0, "length": len(text.split()[0])}],
+                "chat": {"id": 5, "type": "private"}, "from": {"id": 5, "is_bot": False, "first_name": "u"},
+            }}, app.bot)
+            return next((h.callback for h in app.handlers[0] if h.check_update(upd)), None)
+
+        with patch.object(type(app.bot), "username", PropertyMock(return_value="Haze_SGbot")):
+            self.assertIs(first_handler("/psi"), bot.cmd_psi)
+            self.assertIs(first_handler("/stats"), bot.cmd_stats)
+            self.assertIs(first_handler("/weather"), bot.on_unknown_command)
+
+
+class ChatMemberTest(unittest.IsolatedAsyncioTestCase):
+    def _update(self, chat_type, old, new):
+        change = SimpleNamespace(chat=SimpleNamespace(type=chat_type, id=-5),
+                                 from_user=SimpleNamespace(id=7),
+                                 old_chat_member=SimpleNamespace(status=old),
+                                 new_chat_member=SimpleNamespace(status=new))
+        return SimpleNamespace(my_chat_member=change)
+
+    async def test_block_unsubscribes_and_is_recorded(self):
+        with patch.object(bot.alerts, "unsubscribe", AsyncMock()) as unsub, \
+             patch.object(bot.analytics, "record_chat_member", Mock()) as record:
+            await bot.on_my_chat_member(self._update("private", "member", "kicked"), fake_context())
+        unsub.assert_awaited_once_with("7")
+        record.assert_called_once_with("blocked", -5)
+
+    async def test_group_add_is_recorded(self):
+        with patch.object(bot.alerts, "unsubscribe", AsyncMock()) as unsub, \
+             patch.object(bot.analytics, "record_chat_member", Mock()) as record:
+            await bot.on_my_chat_member(self._update("group", "left", "member"), fake_context())
+        unsub.assert_not_awaited()
+        record.assert_called_once_with("group_add", -5)
 
 
 class ViewButtonTest(unittest.IsolatedAsyncioTestCase):
@@ -205,7 +310,7 @@ class ViewButtonTest(unittest.IsolatedAsyncioTestCase):
 class AlertButtonTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         stub = dict(subscribe=AsyncMock(), unsubscribe=AsyncMock(),
-                    current_reading=AsyncMock(return_value=("Good", 30, "east")),
+                    current_reading=AsyncMock(return_value=("Good", 30, "east", None)),
                     is_subscribed=AsyncMock(return_value=False))
         p = patch.multiple(bot.alerts, **stub)
         p.start()
@@ -243,7 +348,8 @@ class AlertButtonTest(unittest.IsolatedAsyncioTestCase):
 
 class ErrorHandlerTest(unittest.IsolatedAsyncioTestCase):
     def ctx(self):
-        return SimpleNamespace(error=ConnectionError("redis down"))
+        return SimpleNamespace(error=ConnectionError("redis down"),
+                               application=SimpleNamespace(create_task=lambda coro: coro.close()))
 
     def real_update(self, u):
         """on_error only replies to real Updates; wrap the fake's parts in one."""
@@ -380,6 +486,7 @@ class StartupTest(unittest.TestCase):
         self.assertGreater(captured["app"].update_processor.max_concurrent_updates, 1)
         self.assertEqual(captured["secret_token"], bot.WEBHOOK_SECRET)  # webhook is authenticated
         self.assertIn(bot.on_error, captured["app"].error_handlers)
+        self.assertIn("my_chat_member", captured["allowed_updates"])  # blocks and group adds
 
     def test_webhook_secret_is_stable_and_valid(self):
         import hashlib

@@ -37,6 +37,22 @@ class OpeningLineTest(unittest.TestCase):
         self.assertIn("/alert to turn these off", text)
 
 
+class CurrentReadingTest(unittest.IsolatedAsyncioTestCase):
+    async def test_includes_publish_time(self):
+        from datetime import datetime
+        with patch.object(alerts, "get_psi_data", AsyncMock(return_value=(tests.SAMPLE_DATA, None))):
+            category, value, region, published = await alerts.current_reading()
+        self.assertEqual((category, value, region), ("Unhealthy", 102, "east"))
+        self.assertEqual(published, datetime.fromisoformat("2026-10-05T12:00:00+08:00").timestamp())
+
+    async def test_missing_publish_time_is_none(self):
+        import copy
+        data = copy.deepcopy(tests.SAMPLE_DATA)
+        del data["data"]["items"][0]["updatedTimestamp"]
+        with patch.object(alerts, "get_psi_data", AsyncMock(return_value=(data, None))):
+            self.assertIsNone((await alerts.current_reading())[3])
+
+
 class FakeRedis:
     """Just enough of redis.asyncio for alerts.run_alert_check."""
 
@@ -61,12 +77,13 @@ class RunAlertCheckTest(unittest.IsolatedAsyncioTestCase):
     def _context(self, send):
         return SimpleNamespace(bot=SimpleNamespace(send_message=send))
 
-    async def _run(self, subs, send, reading=("Unhealthy", 120, "east")):
+    async def _run(self, subs, send, reading=("Unhealthy", 120, "east", None)):
         fake = FakeRedis(subs)
         self.sleep = AsyncMock()
         with patch.object(alerts, "redis_client", fake), \
              patch.object(alerts, "current_reading", AsyncMock(return_value=reading)), \
              patch.object(alerts, "unsubscribe", AsyncMock()) as unsub, \
+             patch.object(alerts.analytics, "record_alert_check", AsyncMock()) as self.tally, \
              patch.object(alerts.asyncio, "sleep", self.sleep):
             await alerts.run_alert_check(self._context(send))
         return fake, unsub
@@ -78,6 +95,28 @@ class RunAlertCheckTest(unittest.IsolatedAsyncioTestCase):
         send.assert_awaited_once()
         self.assertEqual(send.await_args.args[0], 1)
         self.assertEqual(fake.subs["1"]["last_category"], "Unhealthy")
+        self.tally.assert_awaited_once_with(["1"], 0, 0, 0, None)  # no publish time -> no lag
+
+    async def test_tallies_lag_holds_and_blocks(self):
+        published = alerts.time.time() - 600
+        subs = {"1": {"chat_id": "1", "last_category": "Unhealthy"},           # improving: alert
+                "2": {"chat_id": "2", "last_category": "Unhealthy",
+                      "last_alert_at": str(alerts.time.time())},                # improving: held
+                "3": {"chat_id": "3", "last_category": "Good"}}                 # worsening: alert
+        send = AsyncMock(side_effect=lambda chat_id, *a, **k: None)
+        await self._run(subs, send, reading=("Moderate", 80, "east", published))
+        sent_to, failed, blocked, held, lag = self.tally.await_args.args
+        self.assertEqual((sorted(sent_to), failed, blocked, held), (["1", "3"], 0, 0, 1))
+        self.assertAlmostEqual(lag, 600, delta=5)  # only the worsening alert sets lag
+
+    async def test_blocked_send_is_tallied(self):
+        await self._run({"1": {"chat_id": "1", "last_category": "Moderate"}},
+                        AsyncMock(side_effect=Forbidden("blocked")))
+        self.tally.assert_awaited_once_with([], 0, 1, 0, None)
+
+    async def test_nothing_to_tally_skips_the_write(self):
+        await self._run({"1": {"chat_id": "1", "last_category": "Unhealthy"}}, AsyncMock())
+        self.tally.assert_not_awaited()
 
     async def test_failed_send_is_retried_next_check(self):
         send = AsyncMock(side_effect=TimedOut())
@@ -118,7 +157,7 @@ class RunAlertCheckTest(unittest.IsolatedAsyncioTestCase):
         fake = FakeRedis({})
         fake.users.add("9")
         with patch.object(alerts, "redis_client", fake), \
-             patch.object(alerts, "current_reading", AsyncMock(return_value=("Good", 30, "east"))):
+             patch.object(alerts, "current_reading", AsyncMock(return_value=("Good", 30, "east", None))):
             await alerts.run_alert_check(self._context(AsyncMock()))
         self.assertNotIn("9", fake.users)
 
