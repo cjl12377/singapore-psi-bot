@@ -425,6 +425,8 @@ def format_stats(r: dict) -> list[str]:
     ev = r["events"].get
     since = r["since"].isoformat() if r["since"] else None
     note = f" (tracked since {since})" if since else " (no detailed data yet)"
+    avg_dau, mau = r["avg_dau"], r["mau"]
+    stickiness = f"{100 * avg_dau / mau:.0f}%" if avg_dau is not None and mau else "—"
 
     users = (
         f"<b>Bot Analytics</b>\n\n"
@@ -433,8 +435,7 @@ def format_stats(r: dict) -> list[str]:
         f"Today: {r['today_active']} active — {r['today_new']} new, "
         f"{r['today_active'] - r['today_new']} returning\n"
         f"Weekly active: {r['wau']} · Monthly active: {r['mau']}{note}\n"
-        f"Avg daily ÷ monthly (stickiness): "
-        f"{_pct(round(r['avg_dau']), r['mau']) if r['avg_dau'] is not None else '—'}\n"
+        f"Avg daily ÷ monthly (stickiness): {stickiness}\n"
         f"All-time unique users: <b>{r['total_users']}</b>\n"
         f"Regulars (4+ visits >12h apart, all-time): {r['regulars']}\n"
         f"Alert subscribers: {r['alert_subs']} ({_pct(r['alert_subs'], r['total_users'])} of users)\n"
@@ -595,14 +596,10 @@ async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     change: ChatMemberUpdated = update.my_chat_member
     event = analytics.chat_member_event(change.chat.type, change.old_chat_member.status,
                                         change.new_chat_member.status)
-    if event is None:
-        return
-    if event == "blocked":  # no point alerting someone who blocked the bot
-        try:
-            await alerts.unsubscribe(str(change.from_user.id))
-        except Exception as exc:
-            logger.warning("unsubscribe on block failed: %s", type(exc).__name__)
-    _track(context, analytics.record_chat_member(event, change.chat.id))
+    # Recorded only: a block doesn't unsubscribe alerts here, since a subscription may
+    # deliver to a group chat. The alert job unsubscribes when its own send is refused.
+    if event is not None:
+        _track(context, analytics.record_chat_member(event, change.chat.id))
 
 
 async def cmd_feedback_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

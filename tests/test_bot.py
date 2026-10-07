@@ -259,12 +259,19 @@ class ChatMemberTest(unittest.IsolatedAsyncioTestCase):
                                  new_chat_member=SimpleNamespace(status=new))
         return SimpleNamespace(my_chat_member=change)
 
-    async def test_block_unsubscribes_and_is_recorded(self):
+    async def test_block_is_recorded_without_touching_alerts(self):
+        # A subscription can deliver to a group, so a private block mustn't cancel it.
         with patch.object(bot.alerts, "unsubscribe", AsyncMock()) as unsub, \
              patch.object(bot.analytics, "record_chat_member", Mock()) as record:
             await bot.on_my_chat_member(self._update("private", "member", "kicked"), fake_context())
-        unsub.assert_awaited_once_with("7")
+        unsub.assert_not_awaited()
         record.assert_called_once_with("blocked", -5)
+
+    async def test_irrelevant_change_is_ignored(self):
+        with patch.object(bot.analytics, "record_chat_member", Mock()) as record:
+            await bot.on_my_chat_member(self._update("supergroup", "member", "administrator"),
+                                        fake_context())
+        record.assert_not_called()
 
     async def test_group_add_is_recorded(self):
         with patch.object(bot.alerts, "unsubscribe", AsyncMock()) as unsub, \

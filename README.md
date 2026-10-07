@@ -65,7 +65,7 @@ Both commands:
 
 ## What `/stats` measures
 
-A PSI request is `/psi`, the 🌫 Check PSI button, or a shared location. It counts once it gets past the 30-second cooldown. The preview after a `/view` change doesn't count. All analytics writes run in the background after the reply, and a failed write is logged and dropped, so a Redis outage never delays or breaks a reply.
+A PSI request is `/psi`, the 🌫 Check PSI button, or a shared location. It counts toward active users once a reading has been sent: it must get past the 30-second cooldown, and the data must be available, fresh or stale. A request that fails because data.gov.sg is down is counted only as a fetch failure. The preview after a `/view` change doesn't count. All analytics writes run in the background after the reply, and a failed write is logged and dropped, so a Redis outage never delays or breaks a reply.
 
 **Users**
 - **Active (24h)** is the number of people with a request in the rolling last 24 hours.
@@ -86,7 +86,7 @@ A PSI request is `/psi`, the 🌫 Check PSI button, or a shared location. It cou
 **Alerts**
 - Sent, failed and blocked alerts, and alerts held back by the flap guard. A held alert is counted on each 30-minute check it's held for.
 - **Follow-up rate** is the share of alerts followed by a PSI request from the same user within an hour. Telegram doesn't tell bots when a message is read.
-- **Warning lag** is the time from NEA publishing a reading to the first *worsening* alert it caused, over the last 200 such alerts.
+- **Warning lag** is the time from NEA publishing a reading to the first *worsening* alert sent for it. One sample is kept per alert check that sent a worsening alert, up to the last 200 checks.
 
 **Reliability**
 - **Reply time in the bot** runs from the handler starting to the reply being sent.
@@ -112,7 +112,7 @@ Not tracked yet: language, planning-area demand, peak load, and haze-day return 
 | `psi:reply_ms:<YYYY-MM-DD>` | List | Time in the handler per PSI reply, in ms, last 1,000 that day. Expires after 100 days |
 | `psi:e2e_ms:<YYYY-MM-DD>` | List | Time from the user's message to the reply, in ms, last 1,000 that day. Expires after 100 days |
 | `psi:unknown_cmds:<YYYY-MM-DD>` | Hash | Unrecognised command name → count, at most 100 names. Expires after 100 days |
-| `psi:alert_lag` | List | Seconds from NEA's reading to the first worsening alert, last 200 |
+| `psi:alert_lag` | List | Seconds from NEA's reading to the first worsening alert, one per alert check that sent one, last 200 |
 | `psi:alerted:<user_id>` | String | Set when an alert is sent. Expires after 1 hour, and is used to measure follow-up |
 | `psi:groups` | Set | Group chat IDs the bot has been added to (since tracking began) |
 
