@@ -55,7 +55,8 @@ def fake_update(uid=1, text="/feedback", username="jane", chat_type=ChatType.PRI
 
 
 def fake_context(args=None):
-    return SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock()), args=args or [])
+    return SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock()), args=args or [],
+                           application=SimpleNamespace(create_task=lambda coro: coro.close()))
 
 
 class FeedbackTestCase(unittest.IsolatedAsyncioTestCase):

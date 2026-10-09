@@ -1,10 +1,12 @@
 import asyncio
 import hashlib
+import html
 import json
 import logging
 import math
 import os
 import time
+from datetime import datetime
 
 import httpx
 from telegram import (
@@ -12,6 +14,7 @@ from telegram import (
     BotCommandScopeAllChatAdministrators,
     BotCommandScopeAllGroupChats,
     BotCommandScopeAllPrivateChats,
+    ChatMemberUpdated,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
@@ -23,6 +26,7 @@ from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
+    ChatMemberHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -154,6 +158,7 @@ async def on_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "That doesn't look like it's in Singapore — PSI readings only cover Singapore.",
             reply_markup=_keyboard(update),
         )
+        _track(context, analytics.count("location_outside"))
         return
     await _deliver_psi(update, context, place=place)
 
@@ -238,6 +243,18 @@ async def _send_map(token: str, chat_id: int, png: bytes, caption: str,
     return False
 
 
+def _track(context: ContextTypes.DEFAULT_TYPE, coro) -> None:
+    """Run an analytics write in the background, so it never delays or breaks a reply."""
+    context.application.create_task(coro)
+
+
+def _e2e_ms(update: Update) -> float | None:
+    """Milliseconds from the user sending their message to now (second resolution, as
+    Telegram dates are). Includes cold starts and webhook delivery, which handler time misses."""
+    sent_at = getattr(update.message, "date", None)
+    return max(0.0, (time.time() - sent_at.timestamp()) * 1000) if isinstance(sent_at, datetime) else None
+
+
 async def _deliver_psi(
     update: Update, context: ContextTypes.DEFAULT_TYPE, place: tuple[str, str] | None,
     preview: bool = False,
@@ -261,12 +278,12 @@ async def _deliver_psi(
             context.application.create_task(
                 _delete_later(context.bot, sent.chat_id, sent.message_id, wait_int)
             )
+        if not preview:
+            _track(context, analytics.count("cooldown"))
         return
 
     _user_last_request[user_id] = now
     _user_warned.discard(user_id)
-    if not preview:  # a /view preview isn't a fresh request: no analytics
-        await analytics.track_request(user_id)
 
     data, stale_reason = await get_psi_data()
     if data is None:
@@ -274,8 +291,28 @@ async def _deliver_psi(
             f"Could not fetch PSI data: {stale_reason}. Please try again later.",
             reply_markup=_keyboard(update),
         )
+        if not preview:
+            _track(context, analytics.count("fetch_fail"))
         return
 
+    sent_as = await _send_psi(update, context, data, stale_reason, place)
+    if preview:  # a /view preview isn't a fresh request: no analytics
+        return
+    events = ["psi", f"sent_{sent_as}"]
+    if place:
+        events.append("psi_location")
+    if update.effective_chat.type != ChatType.PRIVATE:
+        events.append("psi_group")
+    if stale_reason:
+        events.append("stale")
+    _track(context, analytics.track_request(user_id, events, reply_ms=(time.monotonic() - now) * 1000,
+                                            e2e_ms=_e2e_ms(update)))
+
+
+async def _send_psi(update: Update, context: ContextTypes.DEFAULT_TYPE, data: dict,
+                    stale_reason: str | None, place: tuple[str, str] | None) -> str:
+    """Send the reading in the best format that works; returns which one was used."""
+    user_id = str(update.effective_user.id)
     area, region = place if place else (None, None)
     token, chat_id, keyboard = context.bot.token, update.effective_chat.id, _keyboard(update)
     wants_map = await prefs.get_view(user_id) == prefs.VIEW_MAP
@@ -285,13 +322,13 @@ async def _deliver_psi(
         if await _send_rich(token, chat_id,
                             format_psi_rich(data, stale_reason, area, region, map_id=MAP_MEDIA_ID), png,
                             reply_markup=keyboard):
-            return
+            return "rich_map"
         if await _send_map(token, chat_id, png, format_psi_caption(data, stale_reason, area, region),
                            reply_markup=keyboard):
-            return
+            return "photo"
     if await _send_rich(token, chat_id, format_psi_rich(data, stale_reason, area, region),
                         reply_markup=keyboard):
-        return
+        return "rich"
 
     text = (
         format_psi_message(data, stale_reason)
@@ -299,6 +336,7 @@ async def _deliver_psi(
         else format_region_psi_message(data, *place, stale_reason)
     )
     await update.effective_chat.send_message(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+    return "text"
 
 
 ALERT_EXPLAINER = (
@@ -347,14 +385,16 @@ async def on_alert_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if action == "off":
         await alerts.unsubscribe(user_id)
+        _track(context, analytics.count("alert_off"))
         text, markup = _alert_status(user_id, False)
     elif action == "on":
         reading = await alerts.current_reading()
         if reading is None:
             await query.edit_message_text("Couldn't reach data.gov.sg just now — please try /alert again in a bit.")
             return
-        category, value, _ = reading
+        category, value = reading[:2]
         await alerts.subscribe(user_id, query.message.chat_id, category)
+        _track(context, analytics.count("alert_on"))
         text, markup = _alert_status(user_id, True, f"\n\nRight now: <b>{category}</b> (PSI {value}).")
     else:
         return
@@ -366,24 +406,105 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id != ADMIN_USER_ID or update.effective_chat.type != ChatType.PRIVATE:
         return  # silent — indistinguishable from an unrecognized command
 
-    active_24h = await analytics.active_users_24h()
-    total_users = await analytics.total_unique_users()
-    retained = await analytics.retained_users()
-    growth = await analytics.daily_growth(7)
+    for text in _pack_messages(format_stats(await analytics.report()), "\n\n"):
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
-    growth_lines = "\n".join(f"{date[5:]}   +{count}" for date, count in growth)
-    week_total = sum(count for _, count in growth)
 
-    await update.message.reply_text(
+def _pct(part: int, whole: int) -> str:
+    return f"{round(100 * part / whole)}%" if whole else "—"
+
+
+def _secs(ms: float | None) -> str:
+    if ms is None:
+        return "—"
+    return f"{ms / 1000:.1f}s" if ms < 60_000 else f"{ms / 60_000:.0f} min"
+
+
+def format_stats(r: dict) -> list[str]:
+    """/stats as HTML sections, each a separate block for _pack_messages."""
+    ev = r["events"].get
+    since = r["since"].isoformat() if r["since"] else None
+    note = f" (tracked since {since})" if since else " (no detailed data yet)"
+    avg_dau, mau = r["avg_dau"], r["mau"]
+    stickiness = f"{100 * avg_dau / mau:.0f}%" if avg_dau is not None and mau else "—"
+
+    users = (
         f"<b>Bot Analytics</b>\n\n"
-        f"Active users (24h): <b>{active_24h}</b>\n"
-        f"All-time unique users: <b>{total_users}</b>\n"
-        f"Retained (4+ visits, >12h apart): <b>{retained}</b>\n\n"
-        f"<b>New users, last 7 days</b>\n"
-        f"<pre>{growth_lines}</pre>\n"
-        f"Total this week: +{week_total}",
-        parse_mode=ParseMode.HTML,
+        f"<b>Users</b>\n"
+        f"Active (24h): <b>{r['active_24h']}</b>\n"
+        f"Today: {r['today_active']} active — {r['today_new']} new, "
+        f"{r['today_active'] - r['today_new']} returning\n"
+        f"Weekly active: {r['wau']} · Monthly active: {r['mau']}{note}\n"
+        f"Avg daily ÷ monthly (stickiness): {stickiness}\n"
+        f"All-time unique users: <b>{r['total_users']}</b>\n"
+        f"Regulars (4+ visits >12h apart, all-time): {r['regulars']}\n"
+        f"Alert subscribers: {r['alert_subs']} ({_pct(r['alert_subs'], r['total_users'])} of users)\n"
+        f"Groups (joined since tracking began): {r['groups']}"
     )
+
+    labels = {1: "Next day", 7: "Within 7 days", 30: "Within 30 days"}
+    lines = []
+    for window, (back, size) in r["returns"].items():
+        lines.append(f"{labels[window]}: {_pct(back, size)} ({back}/{size})" if size
+                     else f"{labels[window]}: — (not enough data yet)")
+    retention = ("<b>Retention</b> — new users who came back\n"
+                 f"<i>last {analytics.COHORT_DAYS} daily cohorts with a complete window</i>\n"
+                 + "\n".join(lines))
+
+    rows = "\n".join(f"{day[5:]}  +{new:<3} {active:>4} active" for day, new, active in r["daily"])
+    daily = (f"<b>Last 7 days</b>\n<pre>{rows}</pre>\n"
+             f"New this week: +{sum(new for _, new, _ in r['daily'])}")
+
+    top = ", ".join(f"/{html.escape(name)} {n}" for name, n in r["unknown"][:5])
+    usage = (
+        f"<b>Usage, last 7 days</b>\n"
+        f"PSI checks: {ev('psi', 0)} (by location: {ev('psi_location', 0)}, in groups: {ev('psi_group', 0)})\n"
+        f"Locations outside Singapore: {ev('location_outside', 0)}\n"
+        f"Cooldown hits: {ev('cooldown', 0)}\n"
+        f"View changes: {ev('view_change', 0)} · Feedback: {ev('feedback', 0)}\n"
+        f"Unrecognised commands: {ev('unknown_cmd', 0)}{f' — {top}' if top else ''}\n"
+        f"Other text (not feedback): {ev('free_text', 0)}\n"
+        f"Blocked the bot: {ev('blocked', 0)} · Unblocked: {ev('unblocked', 0)}\n"
+        f"Added to groups: {ev('group_add', 0)} · Removed: {ev('group_remove', 0)}"
+    )
+
+    lags = [s * 1000 for s in r["alert_lags"]]
+    alerts_block = (
+        f"<b>Alerts, last 7 days</b>\n"
+        f"Sent: {ev('alert_sent', 0)} · Failed: {ev('alert_failed', 0)} · "
+        f"Blocked: {ev('alert_blocked', 0)}\n"
+        f"Held by flap guard (per check): {ev('alert_held', 0)}\n"
+        f"Followed by a PSI check within 1h: {_pct(ev('alert_followup', 0), ev('alert_sent', 0))}\n"
+        f"Turned on: {ev('alert_on', 0)} · Turned off: {ev('alert_off', 0)}\n"
+        f"Warning lag, NEA reading → alert (last {len(lags)}): "
+        f"median {_secs(analytics.percentile(lags, 50))}, worst {_secs(max(lags) if lags else None)}"
+    )
+
+    p = analytics.percentile
+    reliability = (
+        f"<b>Reliability, last 7 days</b>\n"
+        f"Reply time in the bot: p50 {_secs(p(r['reply_ms'], 50))} · p95 {_secs(p(r['reply_ms'], 95))}\n"
+        f"Reply time end to end: p50 {_secs(p(r['e2e_ms'], 50))} · p95 {_secs(p(r['e2e_ms'], 95))}\n"
+        f"Sent as: map {ev('sent_rich_map', 0)} · photo {ev('sent_photo', 0)} · "
+        f"rich text {ev('sent_rich', 0)} · plain {ev('sent_text', 0)}\n"
+        f"Stale data served: {ev('stale', 0)} · Fetch failures: {ev('fetch_fail', 0)}\n"
+        f"Error replies: {ev('error', 0)}"
+    )
+    return [users, retention, daily, usage, alerts_block, reliability]
+
+
+def _pack_messages(blocks: list[str], separator: str) -> list[str]:
+    """Pack whole blocks into as few messages as fit Telegram's 4,096-character cap."""
+    messages, current = [], ""
+    for block in blocks:
+        candidate = f"{current}{separator}{block}" if current else block
+        if len(candidate) > 4000 and current:
+            messages.append(current)
+            current = block
+        else:
+            current = candidate
+    messages.append(current)
+    return messages
 
 
 _awaiting_feedback: dict[str, float] = {}  # user -> deadline for their next message
@@ -422,6 +543,7 @@ async def _save_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
                                        parse_mode=ParseMode.HTML)
     except Exception as exc:  # it's saved either way; /feedback_list still lists it
         logger.warning("feedback DM to admin failed: %s", type(exc).__name__)
+    _track(context, analytics.count("feedback"))
     note = f" It was trimmed to {feedback.MAX_LEN:,} characters." if trimmed else ""
     await update.message.reply_text(f"🙏 Thanks — your feedback was sent.{note}",
                                     reply_markup=_keyboard(update))
@@ -452,6 +574,32 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     deadline = _awaiting_feedback.pop(str(update.effective_user.id), None)
     if deadline is not None and time.monotonic() < deadline:
         await _save_feedback(update, context, update.message.text)
+    else:  # what people type when they expect the bot to understand them (content not stored)
+        _track(context, analytics.count("free_text"))
+
+
+async def on_unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Commands no handler took. Silent, as before; counted by name so /stats shows what
+    people expect the bot to do. In groups only /cmd@ThisBot counts, since a bare /cmd
+    there is usually meant for another bot."""
+    text = update.message.text or ""
+    name = analytics.parse_command(text, context.bot.username)
+    if name is None:
+        return
+    if update.effective_chat.type != ChatType.PRIVATE and "@" not in text.split()[0]:
+        return
+    _track(context, analytics.record_unknown_command(name))
+
+
+async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """The bot was blocked/unblocked in a private chat, or added to/removed from a group."""
+    change: ChatMemberUpdated = update.my_chat_member
+    event = analytics.chat_member_event(change.chat.type, change.old_chat_member.status,
+                                        change.new_chat_member.status)
+    # Recorded only: a block doesn't unsubscribe alerts here, since a subscription may
+    # deliver to a group chat. The alert job unsubscribes when its own send is refused.
+    if event is not None:
+        _track(context, analytics.record_chat_member(event, change.chat.id))
 
 
 async def cmd_feedback_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -467,17 +615,7 @@ async def cmd_feedback_list(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     total = await feedback.count()
     blocks = [f"<b>Feedback</b> — newest {len(entries)} of {total}"]
     blocks += [feedback.format_entry(e) for e in entries]
-    # Telegram caps a message at 4,096 characters; pack whole entries into each message.
-    messages, current = [], ""
-    for block in blocks:
-        candidate = f"{current}\n\n———\n\n{block}" if current else block
-        if len(candidate) > 4000 and current:
-            messages.append(current)
-            current = block
-        else:
-            current = candidate
-    messages.append(current)
-    for text in messages:
+    for text in _pack_messages(blocks, "\n\n———\n\n"):
         await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 
@@ -513,6 +651,7 @@ async def on_view_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await _answer(query, "Couldn't save that — try again in a bit.", show_alert=True)
         return
     await _answer(query, "Saved")
+    _track(context, analytics.count("view_change"))
     text, markup = _view_status(view)
     try:
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
@@ -530,6 +669,7 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error("Unhandled error: %s", type(context.error).__name__, exc_info=context.error)
     if not isinstance(update, Update) or update.effective_chat is None:
         return  # a job, or an update we'd never reply to
+    _track(context, analytics.count("error"))  # in the background: Redis may be what's down
     try:
         if update.callback_query:
             try:
@@ -591,6 +731,9 @@ async def _post_init(app: Application) -> None:
         await app.bot.set_my_description(DESCRIPTION)
 
 
+ALLOWED_UPDATES = [Update.MESSAGE, Update.CALLBACK_QUERY, Update.MY_CHAT_MEMBER]
+
+
 def main() -> None:
     app = (
         Application.builder()
@@ -620,6 +763,9 @@ def main() -> None:
     # tapping 🌫 Check PSI is never captured as feedback.
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE & filters.UpdateType.MESSAGE, on_text))
+    # Last in its group, so it only sees commands none of the handlers above took.
+    app.add_handler(MessageHandler(filters.COMMAND & filters.UpdateType.MESSAGE, on_unknown_command))
+    app.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageHandler(
         (filters.COMMAND | filters.LOCATION | filters.Text([PSI_BUTTON])) & filters.UpdateType.MESSAGE,
         _cancel_feedback_prompt), group=-1)
@@ -633,6 +779,9 @@ def main() -> None:
         url_path="webhook",
         webhook_url=f"{WEBHOOK_URL}/webhook",
         secret_token=WEBHOOK_SECRET,
+        # Telegram keeps whatever list it was last given, so ask explicitly rather than
+        # assume my_chat_member (blocks, group adds) is included. Edits aren't handled.
+        allowed_updates=ALLOWED_UPDATES,
     )
 
 

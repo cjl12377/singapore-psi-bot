@@ -1,12 +1,14 @@
 import asyncio
 import logging
 import time
+from datetime import datetime
 from typing import Optional
 
 from telegram.constants import ParseMode
 from telegram.error import Forbidden, RetryAfter
 from telegram.ext import ContextTypes
 
+import analytics
 from analytics import redis_client
 from psi import PSI_BANDS, advice_block, get_psi_data, psi_category, worst_region
 
@@ -64,8 +66,9 @@ def format_alert(old: str, new: str, value: int, region: str) -> str:
     )
 
 
-async def current_reading() -> Optional[tuple[str, int, str]]:
-    """(category, value, region) from fresh data only — never alert on stale data."""
+async def current_reading() -> Optional[tuple[str, int, str, Optional[float]]]:
+    """(category, value, region, published) from fresh data only — never alert on stale data.
+    published is NEA's update time as a Unix timestamp, or None if missing or unparseable."""
     data, stale_reason = await get_psi_data()
     if data is None or stale_reason:
         return None
@@ -73,7 +76,11 @@ async def current_reading() -> Optional[tuple[str, int, str]]:
         region, value = worst_region(data)
     except (KeyError, IndexError, TypeError, ValueError):
         return None
-    return psi_category(value)[0], value, region
+    try:
+        published = datetime.fromisoformat(data["data"]["items"][0]["updatedTimestamp"]).timestamp()
+    except (KeyError, IndexError, TypeError, ValueError):
+        published = None
+    return psi_category(value)[0], value, region, published
 
 
 async def is_subscribed(user_id: str) -> bool:
@@ -110,8 +117,9 @@ async def run_alert_check(context: ContextTypes.DEFAULT_TYPE) -> None:
     reading = await current_reading()
     if reading is None:
         return  # fetch failed or data stale — try again next tick
-    category, value, region = reading
+    category, value, region, published = reading
     now = time.time()
+    sent_to, failed, blocked, held, lag = [], 0, 0, 0, None
 
     for uid in user_ids:
         sub = await redis_client.hgetall(_key(uid))
@@ -120,15 +128,25 @@ async def run_alert_check(context: ContextTypes.DEFAULT_TYPE) -> None:
             continue
         old = sub["last_category"]
         if not should_alert(old, category, float(sub.get("last_alert_at", 0)), now):
+            held += old != category  # an improvement waiting out the flap guard
             continue
         try:
             await _send_alert(context.bot, int(sub["chat_id"]), format_alert(old, category, value, region))
             await redis_client.hset(_key(uid), mapping={"last_category": category, "last_alert_at": now})
+            sent_to.append(uid)
+            worse = CATEGORY_RANK.get(category, 0) > CATEGORY_RANK.get(old, 0)
+            if lag is None and worse and published is not None:
+                lag = max(0.0, time.time() - published)  # how long a warning took to reach someone
         except Forbidden:
             await unsubscribe(uid)  # user blocked the bot
+            blocked += 1
         except Exception:
             logger.exception("Alert delivery failed")  # not recorded, so retried next check
+            failed += 1
         await asyncio.sleep(SEND_INTERVAL_SECS)
+
+    if sent_to or failed or blocked or held:
+        await analytics.record_alert_check(sent_to, failed, blocked, held, lag)
 
 
 async def _send_alert(bot, chat_id: int, text: str) -> None:
