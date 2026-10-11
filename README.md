@@ -28,7 +28,7 @@ Design notes:
 
 - **Webhook only.** Updates arrive at `/webhook`, authenticated with a `secret_token` derived from the bot token, so it stays the same across restarts and deploys. Requests without it get a 403.
 - **Token-safe logging.** `httpx` logging is raised to WARNING, since Telegram API URLs contain the bot token.
-- **Rate limiting.** A 30-second per-user cooldown on PSI requests, including the preview after a `/view` change. The first blocked request gets one "please wait" notice that deletes itself; further attempts in the same window are ignored.
+- **Rate limiting.** A 1-second per-user cooldown on PSI requests, including the preview after a `/view` change. The first blocked request gets one "please wait" notice that deletes itself; further attempts in the same window are ignored.
 - **Concurrency.** Updates are handled in parallel. Rendered maps are cached per reading (at most 56: one per planning area plus the plain map), and only one data.gov.sg fetch runs at a time, so a burst of requests at cache expiry makes one call, not many.
 - **Stale data.** If data.gov.sg is unreachable, `/psi` serves the last cached reading with a banner explaining why. After a failed fetch the bot waits 60 seconds before retrying, so an outage doesn't make every request wait out the timeout.
 - **Alert flapping guard.** A reading hovering on a band edge (100 ↔ 101) could otherwise alert every hour. Worsening alerts go out immediately; an improvement within 3 hours of the last alert waits until the reading settles.
@@ -65,7 +65,7 @@ Both commands:
 
 ## What `/stats` measures
 
-A PSI request is `/psi`, the 🌫 Check PSI button, or a shared location. It counts toward active users once a reading has been sent: it must get past the 30-second cooldown, and the data must be available, fresh or stale. A request that fails because data.gov.sg is down is counted only as a fetch failure. The preview after a `/view` change doesn't count. All analytics writes run in the background after the reply, and a failed write is logged and dropped, so a Redis outage never delays or breaks a reply.
+A PSI request is `/psi`, the 🌫 Check PSI button, or a shared location. It counts toward active users once a reading has been sent: it must get past the 1-second cooldown, and the data must be available, fresh or stale. A request that fails because data.gov.sg is down is counted only as a fetch failure. The preview after a `/view` change doesn't count. All analytics writes run in the background after the reply, and a failed write is logged and dropped, so a Redis outage never delays or breaks a reply.
 
 **Users**
 - **Active (24h)** is the number of people with a request in the rolling last 24 hours.

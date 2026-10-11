@@ -65,7 +65,7 @@ PORT = int(os.environ.get("PORT", 8443))
 WEBHOOK_SECRET = hashlib.sha256(f"webhook-secret:{BOT_TOKEN}".encode()).hexdigest()
 ADMIN_USER_ID = int(os.environ["ADMIN_USER_ID"])
 
-USER_COOLDOWN_SECS = 30
+USER_COOLDOWN_SECS = 1
 _user_last_request: dict[str, float] = {}
 _user_warned: set[str] = set()  # users already told about their current cooldown
 

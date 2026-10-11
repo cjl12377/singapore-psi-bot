@@ -73,7 +73,7 @@ class DeliverPsiTest(unittest.IsolatedAsyncioTestCase):
             await bot._deliver_psi(u, c, None)
         self.assertEqual(len(self.sent), 1)
         u.effective_chat.send_message.assert_awaited_once()  # one notice, not four
-        self.assertIn("Please wait 30s", u.effective_chat.send_message.await_args.args[0])
+        self.assertIn(f"Please wait {bot.USER_COOLDOWN_SECS}s", u.effective_chat.send_message.await_args.args[0])
         self.assertEqual(len(c.tasks), 1)  # one delete scheduled, no per-second edits
 
     async def test_notice_returns_after_window_expires(self):
