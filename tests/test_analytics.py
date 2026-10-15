@@ -166,7 +166,7 @@ class RecordingTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_requests_feed_the_report(self):
         await analytics.track_request("1", ["psi", "sent_rich"], reply_ms=400, e2e_ms=1000)
-        await analytics.track_request("2", ["psi", "psi_location", "sent_photo"], reply_ms=800)
+        await analytics.track_request("2", ["psi", "psi_group", "sent_photo"], reply_ms=800)
         await analytics.track_request("1", ["psi", "sent_rich"], reply_ms=600, e2e_ms=3000)
         await analytics.count("cooldown")
         r = await analytics.report()
@@ -174,7 +174,7 @@ class RecordingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((r["today_active"], r["today_new"], r["wau"], r["mau"]), (2, 2, 2, 2))
         self.assertEqual(r["total_users"], 2)
         self.assertEqual(r["events"]["psi"], 3)
-        self.assertEqual(r["events"]["psi_location"], 1)
+        self.assertEqual(r["events"]["psi_group"], 1)
         self.assertEqual(r["events"]["cooldown"], 1)
         self.assertEqual(sorted(r["reply_ms"]), [400, 600, 800])
         self.assertEqual(sorted(r["e2e_ms"]), [1000, 3000])

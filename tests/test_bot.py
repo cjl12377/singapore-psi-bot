@@ -291,16 +291,19 @@ class ViewButtonTest(unittest.IsolatedAsyncioTestCase):
     async def test_saves_and_previews(self):
         u = fake_update(7, callback_data="view:text")
         with patch.object(bot.prefs, "set_view", AsyncMock()) as set_view, \
+             patch.object(bot.prefs, "get_area", AsyncMock(return_value="Bedok")), \
              patch.object(bot, "_deliver_psi", AsyncMock()) as deliver:
             await bot.on_view_button(u, fake_context())
         set_view.assert_awaited_once_with("7", "text")
         self.assertTrue(deliver.await_args.kwargs["preview"])
+        self.assertEqual(deliver.await_args.args[2], ("Bedok", "east"))  # preview shows the saved area
 
     async def test_expired_tap_still_saves_and_updates(self):
         # A tap that woke the service from sleep: Telegram refuses the late answer.
         u = fake_update(7, callback_data="view:text")
         u.callback_query.answer.side_effect = BadRequest("Query is too old and response timeout expired")
         with patch.object(bot.prefs, "set_view", AsyncMock()) as set_view, \
+             patch.object(bot.prefs, "get_area", AsyncMock(return_value=None)), \
              patch.object(bot, "_deliver_psi", AsyncMock()) as deliver:
             await bot.on_view_button(u, fake_context())
         set_view.assert_awaited_once_with("7", "text")
@@ -404,9 +407,41 @@ class LocationTest(unittest.IsolatedAsyncioTestCase):
     async def test_inside_singapore_delivers_region(self):
         u = fake_update(7)
         u.message.location = SimpleNamespace(latitude=1.3236, longitude=103.9273)
-        with patch.object(bot, "_deliver_psi", AsyncMock()) as deliver:
+        with patch.object(bot, "_deliver_psi", AsyncMock()) as deliver, \
+             patch.object(bot.prefs, "save_area", AsyncMock()) as save:
             await bot.on_location(u, fake_context())
         self.assertEqual(deliver.await_args.kwargs["place"], ("Bedok", "east"))
+        save.assert_called_once_with("7", "Bedok")  # the area name only, never the coordinates
+
+    async def test_outside_singapore_saves_nothing(self):
+        u = fake_update(7)
+        u.message.location = SimpleNamespace(latitude=51.5, longitude=-0.12)
+        with patch.object(bot.prefs, "save_area", AsyncMock()) as save:
+            await bot.on_location(u, fake_context())
+        save.assert_not_called()
+
+
+class SavedAreaTest(unittest.IsolatedAsyncioTestCase):
+    """/psi uses the area from the user's last shared location, in private chats only."""
+
+    async def _psi(self, u, area):
+        with patch.object(bot.prefs, "get_area", AsyncMock(return_value=area)) as get_area, \
+             patch.object(bot, "_deliver_psi", AsyncMock()) as deliver:
+            await bot.cmd_psi(u, fake_context())
+        return deliver.await_args.kwargs["place"], get_area
+
+    async def test_private_chat_uses_saved_area(self):
+        place, _ = await self._psi(fake_update(7), "Bedok")
+        self.assertEqual(place, ("Bedok", "east"))
+
+    async def test_no_saved_area_is_singapore_wide(self):
+        place, _ = await self._psi(fake_update(7), None)
+        self.assertIsNone(place)
+
+    async def test_group_never_reveals_saved_area(self):
+        place, get_area = await self._psi(fake_update(7, chat_type=ChatType.GROUP), "Bedok")
+        self.assertIsNone(place)
+        get_area.assert_not_awaited()
 
 
 class KeyboardTest(unittest.IsolatedAsyncioTestCase):
@@ -533,6 +568,20 @@ class PrefsTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await prefs.get_view("7"), prefs.VIEW_MAP)
         with patch.object(prefs, "redis_client", SimpleNamespace(hget=AsyncMock(return_value="text"))):
             self.assertEqual(await prefs.get_view("7"), prefs.VIEW_TEXT)
+
+    async def test_area_is_none_when_redis_down_or_value_bad(self):
+        with patch.object(prefs, "redis_client", SimpleNamespace(hget=AsyncMock(side_effect=ConnectionError))):
+            self.assertIsNone(await prefs.get_area("7"))
+        with patch.object(prefs, "redis_client", SimpleNamespace(hget=AsyncMock(return_value="Atlantis"))):
+            self.assertIsNone(await prefs.get_area("7"))
+        with patch.object(prefs, "redis_client", SimpleNamespace(hget=AsyncMock(return_value="Bedok"))):
+            self.assertEqual(await prefs.get_area("7"), "Bedok")
+
+    async def test_save_area_failure_is_dropped(self):
+        client = SimpleNamespace(hset=AsyncMock(side_effect=ConnectionError))
+        with patch.object(prefs, "redis_client", client):
+            await prefs.save_area("7", "Bedok")  # must not raise
+        client.hset.assert_awaited_once_with("psi:pref:7", "area", "Bedok")
 
 
 if __name__ == "__main__":

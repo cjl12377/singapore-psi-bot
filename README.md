@@ -6,7 +6,7 @@ Try it: [@Haze_SGbot](https://t.me/Haze_SGbot)
 
 ## Features
 
-- **`/psi`** — headline 24-hour PSI (the worst of Singapore's 5 regions) and a colour-coded map of Singapore with each region's value (or a text table; see `/view`).
+- **`/psi`** — headline 24-hour PSI (the worst of Singapore's 5 regions) and a colour-coded map of Singapore with each region's value (or a text table; see `/view`). In a private chat, if you've shared a location before, it shows your last shared area.
 - **`/view`** — choose how `/psi` looks: the map (default, ~20 KB image) or a plain text table. Saved per user.
 - **`/location`**, or just send a location — finds your URA planning area and shows the PSI for its region.
 - **Button bar** — in private chats, **🌫 Check PSI** and **📍 Share location (mobile)** stay pinned under the message box. Telegram doesn't tell bots which device you're on, so desktop shows the location button too; its label says it only works in the phone apps (on desktop, use 📎 → Location).
@@ -34,7 +34,7 @@ Design notes:
 - **Alert flapping guard.** A reading hovering on a band edge (100 ↔ 101) could otherwise alert every hour. Worsening alerts go out immediately; an improvement within 3 hours of the last alert waits until the reading settles.
 - **Alert delivery.** Alerts go out at most 20 a second, under Telegram's ~30/s limit. If Telegram still asks the bot to slow down, it waits the time Telegram gives and retries once; anything that still fails is retried at the next check.
 - **Error replies.** If a handler fails unexpectedly (e.g. Redis is unreachable), the error is logged and the user is told to try again, rather than getting no reply.
-- **Location privacy.** Coordinates are used once to find the planning area and are never logged or stored.
+- **Location privacy.** Coordinates are used once to find the planning area and are never logged or stored. Only the planning area name is saved, so `/psi` in a private chat can show the user's last shared area. Groups always get the Singapore-wide reading.
 
 ### Region mapping
 
@@ -79,7 +79,7 @@ A PSI request is `/psi`, the 🌫 Check PSI button, or a shared location. It cou
 - Day-by-day activity is only recorded from the first deploy of this tracking onwards (`psi:active_since`). Earlier cohorts are left out rather than shown as 0%.
 
 **Usage**
-- Counts of PSI checks (by location, in groups), locations outside Singapore, cooldown hits, `/view` changes, feedback, blocks and unblocks, and group adds and removals.
+- Counts of PSI checks (in groups), cooldown hits, `/view` changes, feedback, blocks and unblocks, and group adds and removals.
 - **Unrecognised commands** are counted by name. Up to 100 names a day are kept; the total always counts. In groups, only `/cmd@ThisBot` counts.
 - **Other text** is private messages that weren't feedback. Only the count is kept, never the text.
 
@@ -103,6 +103,7 @@ Not tracked yet: language, planning-area demand, peak load, and haze-day return 
 | `psi:last_seen` | Sorted set | Last request time per user (24h actives) |
 | `psi:new_users:<YYYY-MM-DD>` | Set | New users per day (SGT) |
 | `psi:requests:<user_id>` | Sorted set | Last 100 request timestamps per user (retention) |
+| `psi:pref:<user_id>` | Hash | Per-user preferences: `view` (`map` or `text`) and `area` (planning area from the last shared location) |
 | `psi:alert:<user_id>` | Hash | Alert subscription: `chat_id`, `last_category`, `last_alert_at` |
 | `psi:alert_users` | Set | Users with alerts on |
 | `psi:feedback` | List | Feedback entries, newest first, capped at 1,000: JSON with `user_id`, `username`, `text`, `ts` |

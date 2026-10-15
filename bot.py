@@ -37,7 +37,7 @@ import alerts
 import analytics
 import feedback
 import prefs
-from location import locate
+from location import AREA_REGION, locate
 from psi import (
     format_psi_caption,
     format_psi_message,
@@ -132,8 +132,17 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def _saved_place(update: Update) -> tuple[str, str] | None:
+    """The area from the user's last shared location. Private chats only, so a group
+    never sees where someone is."""
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return None
+    area = await prefs.get_area(str(update.effective_user.id))
+    return (area, AREA_REGION[area]) if area else None
+
+
 async def cmd_psi(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await _deliver_psi(update, context, place=None)
+    await _deliver_psi(update, context, place=await _saved_place(update))
 
 
 async def cmd_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -143,7 +152,7 @@ async def cmd_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     await update.message.reply_text(
         f"Tap {LOCATION_BUTTON} at the bottom of the chat — I'll use your location once to "
-        "find your PSI region and won't store it.\n\n"
+        "find your PSI region.\n\n"
         "On desktop? The button only works in the phone app — use 📎 → Location instead.",
         reply_markup=MAIN_KEYBOARD,
     )
@@ -158,8 +167,8 @@ async def on_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "That doesn't look like it's in Singapore — PSI readings only cover Singapore.",
             reply_markup=_keyboard(update),
         )
-        _track(context, analytics.count("location_outside"))
         return
+    context.application.create_task(prefs.save_area(str(update.effective_user.id), place[0]))
     await _deliver_psi(update, context, place=place)
 
 
@@ -299,8 +308,6 @@ async def _deliver_psi(
     if preview:  # a /view preview isn't a fresh request: no analytics
         return
     events = ["psi", f"sent_{sent_as}"]
-    if place:
-        events.append("psi_location")
     if update.effective_chat.type != ChatType.PRIVATE:
         events.append("psi_group")
     if stale_reason:
@@ -458,8 +465,7 @@ def format_stats(r: dict) -> list[str]:
     top = ", ".join(f"/{html.escape(name)} {n}" for name, n in r["unknown"][:5])
     usage = (
         f"<b>Usage, last 7 days</b>\n"
-        f"PSI checks: {ev('psi', 0)} (by location: {ev('psi_location', 0)}, in groups: {ev('psi_group', 0)})\n"
-        f"Locations outside Singapore: {ev('location_outside', 0)}\n"
+        f"PSI checks: {ev('psi', 0)} (in groups: {ev('psi_group', 0)})\n"
         f"Cooldown hits: {ev('cooldown', 0)}\n"
         f"View changes: {ev('view_change', 0)} · Feedback: {ev('feedback', 0)}\n"
         f"Unrecognised commands: {ev('unknown_cmd', 0)}{f' — {top}' if top else ''}\n"
@@ -657,7 +663,7 @@ async def on_view_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
     except BadRequest:  # tapping the already-selected button -> "message is not modified"; nothing changed, so no preview
         return
-    await _deliver_psi(update, context, None, preview=True)
+    await _deliver_psi(update, context, await _saved_place(update), preview=True)
 
 
 ERROR_REPLY = "Something went wrong on my end — please try again in a bit."
