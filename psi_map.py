@@ -7,7 +7,7 @@ from typing import Optional
 from PIL import Image, ImageDraw, ImageFont
 
 from location import AREA_REGION
-from psi import LEGEND_ROWS, REGIONS, psi_category
+from psi import LEGEND_ROWS, PM25_BANDS, REGIONS, pm25_band, psi_category
 
 _AREAS = json.loads((Path(__file__).parent / "planning_areas.json").read_text())["areas"]
 
@@ -19,6 +19,9 @@ _BAND_COLOURS = {
     "Very Unhealthy": ("#F5BDBD", "#D32F2F", "#FFFFFF"),
     "Hazardous": ("#DDC6F0", "#7B2FBE", "#FFFFFF"),
 }
+# NEA's four 1-hr PM2.5 bands reuse the first four PSI colours, mildest first.
+_PM25_COLOURS = {pm: _BAND_COLOURS[psi] for pm, psi in zip(
+    [label for _, label, _ in PM25_BANDS], ["Good", "Moderate", "Unhealthy", "Very Unhealthy"])}
 _UNKNOWN = ("#E0E0E0", "#757575", "#FFFFFF")
 
 _SEA = "#E6EFF5"
@@ -102,16 +105,20 @@ def _centered_text(draw, xy, text, font, fill) -> None:
 def render_psi_map(psi: dict, highlight_area: Optional[str] = None,
                    pm25: Optional[dict] = None) -> bytes:
     """psi: {region: 24-hr PSI}. pm25: {region: 1-hr PM2.5}; when given, the badge shows
-    PM2.5 with the PSI beneath it (colours stay on the PSI band). highlight_area: planning
-    area to outline (location lookups)."""
+    PM2.5 with the PSI beneath it, and the badge, region shading and legend follow NEA's
+    PM2.5 bands. highlight_area: planning area to outline (location lookups)."""
     s = _SCALE
     img = Image.new("RGB", (_WIDTH * s, _HEIGHT * s), _SEA)
     draw = ImageDraw.Draw(img)
 
+    def colours(region: str) -> tuple[str, str, str]:
+        """(pale fill, badge, badge text): the PM2.5 band if known, else the PSI band."""
+        if pm25 and region in pm25:
+            return _PM25_COLOURS[pm25_band(pm25[region])]
+        return _BAND_COLOURS.get(psi_category(psi[region])[0], _UNKNOWN) if region in psi else _UNKNOWN
+
     for area in _AREAS:
-        region = AREA_REGION[area["name"]]
-        label = psi_category(psi[region])[0] if region in psi else None
-        fill = _BAND_COLOURS.get(label, _UNKNOWN)[0]
+        fill = colours(AREA_REGION[area["name"]])[0]
         for ring in area["rings"]:
             pts = [_project(x, y) for x, y in ring]
             draw.polygon(pts, fill=fill, outline="#FFFFFF", width=s)
@@ -127,8 +134,7 @@ def render_psi_map(psi: dict, highlight_area: Optional[str] = None,
     for region, (lon, lat) in _ANCHORS.items():
         if region not in psi:
             continue
-        label = psi_category(psi[region])[0]
-        _, badge, text_col = _BAND_COLOURS.get(label, _UNKNOWN)
+        _, badge, text_col = colours(region)
         x, y = _project(lon, lat)
         two_line = bool(pm25 and region in pm25)
         val = str(pm25[region]) if two_line else str(psi[region])
@@ -155,8 +161,10 @@ def render_psi_map(psi: dict, highlight_area: Optional[str] = None,
     return buf.getvalue()
 
 
-_BANDS = [(_BAND_COLOURS[{"V. Unhealthy": "Very Unhealthy"}.get(label, label)][1], label, rng)
-          for _, label, rng in LEGEND_ROWS]
+# Legend bars: (badge colour, text colour, label, range)
+_PSI_LEGEND = [(*_BAND_COLOURS[{"V. Unhealthy": "Very Unhealthy"}.get(label, label)][1:], label, rng)
+               for _, label, rng in LEGEND_ROWS]
+_PM25_LEGEND = [(*_PM25_COLOURS[label][1:], label, rng) for _, label, rng in PM25_BANDS]
 
 
 def _key_badge(draw, cx: float, cy: float, s: int) -> float:
@@ -176,7 +184,8 @@ def _key_badge(draw, cx: float, cy: float, s: int) -> float:
 
 
 def _draw_legend(draw, has_pm25: bool) -> None:
-    """Bottom strip: sample badge (what the two badge numbers mean), then a PSI colour bar."""
+    """Bottom strip: sample badge (what the two badge numbers mean), then the colour bar for
+    the badges: PM2.5 bands when they show PM2.5, else PSI bands."""
     s = _SCALE
     mid = (_HEIGHT - _LEGEND_H / 2 - 10) * s
     name_f, rng_f, cap_f = _font(13 * s), _font(12 * s), _font(11 * s)
@@ -189,18 +198,18 @@ def _draw_legend(draw, has_pm25: bool) -> None:
     else:
         bx0 = left
     bx1 = (_WIDTH - 36) * s
-    draw.text((bx0, mid - 26 * s), "PSI LEVEL", font=cap_f, fill=_MUTED, anchor="lm")
+    caption, bands = ("1-HR PM2.5 LEVEL (µg/m³)", _PM25_LEGEND) if has_pm25 else ("PSI LEVEL", _PSI_LEGEND)
+    draw.text((bx0, mid - 26 * s), caption, font=cap_f, fill=_MUTED, anchor="lm")
 
     # Segmented colour bar, name under each segment, range inside
     bar_h, gap = 16 * s, 4 * s
-    seg_w = (bx1 - bx0 - gap * 4) / 5
+    seg_w = (bx1 - bx0 - gap * (len(bands) - 1)) / len(bands)
     by = mid - 6 * s
-    for i, (colour, label, rng) in enumerate(_BANDS):
+    for i, (colour, text_col, label, rng) in enumerate(bands):
         sx = bx0 + i * (seg_w + gap)
         draw.rounded_rectangle((sx, by - bar_h / 2, sx + seg_w, by + bar_h / 2),
                                radius=bar_h / 2, fill=colour)
-        _centered_text(draw, (sx + seg_w / 2, by), rng, rng_f,
-                       "#2B2B2B" if label == "Moderate" else "#FFFFFF")
+        _centered_text(draw, (sx + seg_w / 2, by), rng, rng_f, text_col)
         _centered_text(draw, (sx + seg_w / 2, by + 22 * s), label, name_f, _INK)
 
 

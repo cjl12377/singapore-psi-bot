@@ -36,6 +36,19 @@ def psi_category(value: int | float) -> tuple[str, str]:
     return "Unknown", "⚪"
 
 
+# NEA's 1-hr PM2.5 bands (haze.gov.sg/resources/1-hr-pm2.5-readings): (upper bound, label, legend range)
+PM25_BANDS = [
+    (55, "Normal", "0-55"),
+    (150, "Elevated", "56-150"),
+    (250, "High", "151-250"),
+    (float("inf"), "Very High", ">250"),
+]
+
+
+def pm25_band(value: int | float) -> str:
+    return next(label for hi, label, _ in PM25_BANDS if value <= hi)
+
+
 def _fmt_timestamp(ts: str) -> str:
     try:
         dt = datetime.fromisoformat(ts)
